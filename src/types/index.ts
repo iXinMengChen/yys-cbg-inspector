@@ -146,6 +146,7 @@ export type CbgPayloadConversionOptions = {
   accountOnly?: boolean;
 };
 
+export * from "./accountMatcher";
 export * from "./calculator";
 export * from "./heroSkills";
 export * from "./home";
