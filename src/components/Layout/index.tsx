@@ -6,13 +6,16 @@ import {
   Grid,
   Layout as AntLayout,
   message,
+  Modal,
   Switch,
+  Typography,
   theme as antdTheme,
 } from "antd";
 import type { AppLayoutProps } from "@/types/layout";
 import { PageNavigation } from "./PageNavigation";
 import { MobileLayoutContext } from "./mobileLayout";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { shallowEqual } from "react-redux";
 import { DatasetHistoryModal } from "@/components/DatasetHistoryModal";
 import { MaintenanceModal } from "@/components/MaintenanceModal";
 import { ProductLoader } from "@/components/ProductLoader";
@@ -29,18 +32,19 @@ import {
   setCacheReady,
   setDataset,
   setHistory,
+  setHistoryLoading,
   setHistoryOpen,
   setProductUrl,
   setRestoreNotice,
   setStaticAssetPreview,
   setStaticDataLoading,
   setUpdating,
+  upsertHistoryRecord,
   setMaintenanceOpen,
   useAppDispatch,
   useAppSelector,
 } from "@/store";
 import {
-  convertCbgPayloadToDataset,
   extractCbgCollectionSkinCount,
   extractCbgSpeedHighlights,
   getCbgChannelFromUrl,
@@ -53,6 +57,7 @@ import {
   markStaticRefresh,
 } from "@/lib/staticRefresh";
 import { loadHeroPanels, loadRelicSuits } from "@/lib/staticApi";
+import { convertCbgPayloadInWorker } from "@/lib/cbgDataset";
 import { buildAccountSummary } from "@/lib/accountSummary";
 import {
   applyTheme,
@@ -71,6 +76,7 @@ type RelicSuitStaticPayload = {
 };
 
 const CBG_DATA_SYNC_STORAGE_KEY = "yys-cbg-sync-enabled";
+const CBG_LOGIN_NOTICE_STORAGE_KEY = "account-matcher-cbg-login-notice-v1";
 
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) return error.message;
@@ -119,7 +125,7 @@ async function migrateCachedSpeedHighlights(
     tcid: product.tcid,
   });
   const gameConfig = {} as GameConfig;
-  const refreshedDataset = convertCbgPayloadToDataset(payload, gameConfig);
+  const refreshedDataset = await convertCbgPayloadInWorker(payload, gameConfig);
   return {
     ...refreshedDataset,
     schemaVersion: 11,
@@ -140,6 +146,7 @@ export function AppLayout({}: AppLayoutProps) {
   const screens = Grid.useBreakpoint();
   const shellRef = useRef<HTMLDivElement>(null);
   const autoOpenedCbgLogin = useRef(false);
+  const autoQueryHandledLocation = useRef<string | null>(null);
   const [isMobile, setIsMobile] = useState(!screens.md);
   const isMedium = Boolean(!isMobile && screens.md && !screens.lg);
   const isWide = Boolean(screens.xl);
@@ -152,11 +159,27 @@ export function AppLayout({}: AppLayoutProps) {
     updating,
     history,
     historyOpen,
+    historyLoading,
     staticDataLoading,
     staticAssetPreview,
     restoreNotice,
     maintenanceOpen,
-  } = useAppSelector((state) => state.app);
+  } = useAppSelector(
+    ({ app }) => ({
+      dataset: app.dataset,
+      productUrl: app.productUrl,
+      cacheReady: app.cacheReady,
+      updating: app.updating,
+      history: app.history,
+      historyOpen: app.historyOpen,
+      historyLoading: app.historyLoading,
+      staticDataLoading: app.staticDataLoading,
+      staticAssetPreview: app.staticAssetPreview,
+      restoreNotice: app.restoreNotice,
+      maintenanceOpen: app.maintenanceOpen,
+    }),
+    shallowEqual,
+  );
   const [api, holder] = message.useMessage();
   const location = useLocation();
   const navigate = useNavigate();
@@ -164,10 +187,25 @@ export function AppLayout({}: AppLayoutProps) {
   const [pendingPage, setPendingPage] = useState<AppRoute | null>(null);
   const [calculationLoading, setCalculationLoading] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
-  const [cbgWindowFullscreen, setCbgWindowFullscreen] = useState(false);
   const [cbgSyncEnabled, setCbgSyncEnabled] = useState(
     () => localStorage.getItem(CBG_DATA_SYNC_STORAGE_KEY) !== "false",
   );
+  const [cbgLoginNoticeOpen, setCbgLoginNoticeOpen] = useState(() => {
+    try {
+      return localStorage.getItem(CBG_LOGIN_NOTICE_STORAGE_KEY) !== "dismissed";
+    } catch {
+      return true;
+    }
+  });
+
+  const dismissCbgLoginNotice = () => {
+    try {
+      localStorage.setItem(CBG_LOGIN_NOTICE_STORAGE_KEY, "dismissed");
+    } catch {
+      // 页面当前会话内仍可关闭提示。
+    }
+    setCbgLoginNoticeOpen(false);
+  };
 
   const uploadAccountSummary = (
     summaryDataset: RelicDataset,
@@ -194,12 +232,14 @@ export function AppLayout({}: AppLayoutProps) {
   const cbgChannel =
     getCbgChannelFromUrl(productUrl) ?? dataset.account?.channel ?? "official";
   const guardedPage =
-    page === "maintenance" || page === "about" || hasLoadedProduct
+    page === "settings" || page === "maintenance" || hasLoadedProduct
       ? page
       : "home";
   const availableNavigationItems = hasLoadedProduct
     ? navigationItems
-    : navigationItems.filter((item) => item.route === "home");
+    : navigationItems.filter(
+        (item) => item.route === "home" || item.route === "settings",
+      );
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
@@ -263,6 +303,10 @@ export function AppLayout({}: AppLayoutProps) {
         loadHeroPanels<HeroStaticPayload>(true),
         loadRelicSuits<RelicSuitStaticPayload>(true),
       ]);
+      const serverListUpdated = await window
+        .desktop!.updateStaticData("/static/server-list")
+        .then(() => true)
+        .catch(() => false);
       const heroIds = Object.values(heroData.heroesById || {})
         .map((hero) => hero.id)
         .filter((id): id is number => Number.isInteger(id) && id > 0);
@@ -283,7 +327,7 @@ export function AppLayout({}: AppLayoutProps) {
       markStaticRefresh();
       dispatch(incrementCalculatorStaticRefreshRequestId());
       api.success(
-        `静态数据已更新：${assetResult.heroIcons} 个式神图标、${assetResult.suitIcons} 个御魂图标`,
+        `静态数据已更新：${assetResult.heroIcons} 个式神图标、${assetResult.suitIcons} 个御魂图标；${serverListUpdated ? "区服表已更新" : "区服表更新失败，继续使用本地版本"}`,
       );
     } catch {
       api.error("静态数据更新失败，请稍后重试");
@@ -295,15 +339,19 @@ export function AppLayout({}: AppLayoutProps) {
   // IndexedDB supports full relic inventories that exceed Safari localStorage limits.
   useEffect(() => {
     let cancelled = false;
+    let historyLoadTimer: number | undefined;
+    let restoredSnapshot: Awaited<
+      ReturnType<typeof loadRecentDatasetSnapshot>
+    > = null;
     const readyFallbackTimer = window.setTimeout(() => {
       if (!cancelled) dispatch(setCacheReady(true));
     }, 1_500);
 
-    void Promise.all([loadRecentDatasetSnapshot(), loadDatasetHistory()])
-      .then(([snapshot, records]) => {
+    void loadRecentDatasetSnapshot()
+      .then((snapshot) => {
         if (cancelled) return;
-        dispatch(setHistory(records));
         if (!snapshot) return;
+        restoredSnapshot = snapshot;
         dispatch(setDataset(snapshot.dataset));
         dispatch(setRestoreNotice("已恢复上次访问数据"));
         // 仅为旧缓存补齐一次藏宝阁已计算的一速和头尾汇总。
@@ -314,34 +362,57 @@ export function AppLayout({}: AppLayoutProps) {
           .then(async (migratedDataset) => {
             if (cancelled || migratedDataset === snapshot.dataset) return;
             dispatch(setDataset(migratedDataset));
-            await saveRecentDatasetSnapshot(
+            const record = await saveRecentDatasetSnapshot(
               migratedDataset,
               snapshot.productUrl,
             );
-            const nextHistory = await loadDatasetHistory();
-            if (!cancelled) dispatch(setHistory(nextHistory));
+            if (!cancelled) dispatch(upsertHistoryRecord(record));
           })
           .catch(() => undefined);
-        // 将旧版只有“最近一次”的缓存同步到新历史记录表。
-        if (
-          !records.some((record) => record.productUrl === snapshot.productUrl)
-        ) {
-          void saveRecentDatasetSnapshot(snapshot.dataset, snapshot.productUrl)
-            .then(() => loadDatasetHistory())
-            .then((nextHistory) => {
-              if (!cancelled) dispatch(setHistory(nextHistory));
-            })
-            .catch(() => undefined);
-        }
       })
       .finally(() => {
         window.clearTimeout(readyFallbackTimer);
-        if (!cancelled) dispatch(setCacheReady(true));
+        if (cancelled) return;
+        dispatch(setCacheReady(true));
+        // 首屏和最近账号先恢复，完整历史记录在首帧后读取。
+        historyLoadTimer = window.setTimeout(() => {
+          // 历史库里每条记录都带整份御魂数据，读取需要几秒；这段耗时明确展示成加载状态，
+          // 避免界面上看不出正在做什么。读取本身已按条让出主线程，加载提示会持续运转。
+          dispatch(setHistoryLoading(true));
+          void loadDatasetHistory()
+            .then((records) => {
+              if (cancelled) return;
+              dispatch(setHistory(records));
+              const snapshot = restoredSnapshot;
+              // 将旧版只有“最近一次”的缓存同步到新历史记录表。
+              if (
+                !snapshot ||
+                records.some(
+                  (record) => record.productUrl === snapshot.productUrl,
+                )
+              ) {
+                return;
+              }
+              return saveRecentDatasetSnapshot(
+                snapshot.dataset,
+                snapshot.productUrl,
+              ).then((record) => {
+                if (!cancelled) dispatch(upsertHistoryRecord(record));
+              });
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              if (!cancelled) dispatch(setHistoryLoading(false));
+            });
+        }, 0);
       });
 
     return () => {
       cancelled = true;
       window.clearTimeout(readyFallbackTimer);
+      if (historyLoadTimer !== undefined) {
+        window.clearTimeout(historyLoadTimer);
+      }
     };
   }, [dispatch]);
 
@@ -358,10 +429,6 @@ export function AppLayout({}: AppLayoutProps) {
     );
     return () => window.clearTimeout(timer);
   }, [dispatch, restoreNotice]);
-
-  const refreshHistory = async () => {
-    dispatch(setHistory(await loadDatasetHistory()));
-  };
 
   useEffect(() => {
     localStorage.setItem(CBG_DATA_SYNC_STORAGE_KEY, String(cbgSyncEnabled));
@@ -387,7 +454,10 @@ export function AppLayout({}: AppLayoutProps) {
         if (!capture || stopped) return;
         const product = parseProductUrl(capture.pageUrl);
         const gameConfig = {} as GameConfig;
-        const next = convertCbgPayloadToDataset(capture.payload, gameConfig);
+        const next = await convertCbgPayloadInWorker(
+          capture.payload,
+          gameConfig,
+        );
         const loadedDataset: RelicDataset = {
           ...next,
           account: {
@@ -399,8 +469,7 @@ export function AppLayout({}: AppLayoutProps) {
         dispatch(setDataset(loadedDataset));
         dispatch(setProductUrl(""));
         void saveRecentDatasetSnapshot(loadedDataset, product.sourceUrl)
-          .then(() => loadDatasetHistory())
-          .then((records) => dispatch(setHistory(records)))
+          .then((record) => dispatch(upsertHistoryRecord(record)))
           .catch(() => undefined);
         uploadAccountSummary(loadedDataset, product.sourceUrl);
       } catch (error) {
@@ -530,13 +599,13 @@ export function AppLayout({}: AppLayoutProps) {
     };
   }, []);
 
-  const loadProduct = async () => {
+  const loadProduct = async (requestedUrl = productUrl) => {
     let loadRequestPending = false;
     dispatch(setUpdating(true));
     try {
-      const product = parseProductUrl(productUrl);
+      const product = parseProductUrl(requestedUrl);
       loadRequestPending = true;
-      const payload = await window.desktop!.loadProduct({
+      const payload = await window.desktop!.loadProductRaw({
         serverid: product.serverid,
         ordersn: product.ordersn,
         channel: product.channel,
@@ -547,8 +616,7 @@ export function AppLayout({}: AppLayoutProps) {
       });
       loadRequestPending = false;
       const gameConfig = {} as GameConfig;
-
-      const next = convertCbgPayloadToDataset(payload, gameConfig);
+      const next = await convertCbgPayloadInWorker(payload, gameConfig);
       const loadedDataset: RelicDataset = {
         ...next,
         account: {
@@ -561,7 +629,9 @@ export function AppLayout({}: AppLayoutProps) {
       dispatch(setDataset(loadedDataset));
       dispatch(setProductUrl(""));
       void saveRecentDatasetSnapshot(loadedDataset, product.sourceUrl)
-        .then(() => refreshHistory())
+        .then((record) => {
+          dispatch(upsertHistoryRecord(record));
+        })
         .catch(() => undefined);
       api.success("商品数据已读取并保存到本机浏览器");
       uploadAccountSummary(loadedDataset, product.sourceUrl);
@@ -576,23 +646,19 @@ export function AppLayout({}: AppLayoutProps) {
       const isEquipDescError = /御魂详情|御魂数据编号|御魂数据地址/.test(
         errorMessage,
       );
-      const feedbackCode =
-        errorMessage.match(/反馈代号[（(]([^）)]+)[）)]/)?.[1];
       const notice = isRiskControl
         ? api.warning({
-            content: `藏宝阁暂时没有返回商品数据，可能是访问风控或服务繁忙。请查看藏宝阁页面是否要求验证；如果页面也受限，暂停请求一段时间后再试。${feedbackCode ? ` 反馈代号：${feedbackCode}` : ""}`,
+            content: `藏宝阁返回异常：${errorMessage}。请在藏宝阁窗口打开同一商品确认页面状态；若页面也提示验证或繁忙，稍后再试。`,
           })
         : isLoginRequired
           ? api.warning({
-              content:
-                "当前没有有效的藏宝阁登录状态。登录后，桌面端会使用藏宝阁面板读取商品。",
+              content: `没有检测到有效的藏宝阁登录状态：${errorMessage}。请在藏宝阁窗口重新登录后再试。`,
             })
           : isEquipDescError
             ? api.error({ content: errorMessage })
             : loadRequestPending
               ? api.warning({
-                  content:
-                    "已登录但商品接口仍未返回数据。桌面端独立请求还需要藏宝阁页面生成的动态校验；若藏宝阁页面能正常看商品，问题在工具请求或网络；若页面也提示访问受限，则属于藏宝阁风控。",
+                  content: `已检测到登录状态，但商品详情请求失败：${errorMessage}。这不一定是风控；可能是藏宝阁页面未就绪、请求超时、网络异常或接口校验失败。请在藏宝阁窗口打开同一商品确认页面状态后重试。`,
                 })
               : api.error({
                   content: errorMessage,
@@ -605,25 +671,56 @@ export function AppLayout({}: AppLayoutProps) {
       dispatch(setUpdating(false));
     }
   };
+  const loadProductRef = useRef(loadProduct);
+  loadProductRef.current = loadProduct;
+
+  useEffect(() => {
+    const routeState = location.state as {
+      autoQueryProductUrl?: unknown;
+      autoQueryHistoryRecordId?: unknown;
+    } | null;
+    const historyRecordId = routeState?.autoQueryHistoryRecordId;
+    const requestedUrl = routeState?.autoQueryProductUrl;
+    if (page !== "home" || autoQueryHandledLocation.current === location.key) {
+      return;
+    }
+
+    if (typeof historyRecordId === "string" && historyRecordId.trim()) {
+      autoQueryHandledLocation.current = location.key;
+      navigate(APP_ROUTE_PATHS.home, { replace: true, state: null });
+      dispatch(setProductUrl(""));
+      dispatch(setUpdating(true));
+      void loadDatasetHistoryRecord(historyRecordId)
+        .then((record) => {
+          if (!record) throw new Error("该历史记录已失效，请重新读取账号链接");
+          dispatch(setDataset(record.dataset));
+          void saveRecentDatasetSnapshotOnly(
+            record.dataset,
+            record.productUrl,
+          ).catch(() => undefined);
+          dispatch(setRestoreNotice("已从本机历史打开账号数据"));
+        })
+        .catch((error: unknown) => {
+          api.error(
+            error instanceof Error ? error.message : "历史记录读取失败",
+          );
+        })
+        .finally(() => dispatch(setUpdating(false)));
+      return;
+    }
+
+    if (typeof requestedUrl !== "string" || !requestedUrl.trim()) return;
+    autoQueryHandledLocation.current = location.key;
+    navigate(APP_ROUTE_PATHS.home, { replace: true, state: null });
+    dispatch(setProductUrl(requestedUrl));
+    void loadProductRef.current(requestedUrl);
+  }, [api, dispatch, location.key, location.state, navigate, page]);
 
   const openCbgWindow = async () => {
     try {
-      const isFullscreen = await window.desktop?.toggleCbgWindow(cbgChannel);
-      if (typeof isFullscreen === "boolean") {
-        setCbgWindowFullscreen(isFullscreen);
-      }
+      await window.desktop?.toggleCbgWindow(cbgChannel);
     } catch (error) {
       api.error(getErrorMessage(error, "无法打开藏宝阁窗口"));
-    }
-  };
-
-  const toggleCbgWindowFullscreen = async () => {
-    const next = !cbgWindowFullscreen;
-    try {
-      await window.desktop?.setCbgWindowFullscreen(cbgChannel, next);
-      setCbgWindowFullscreen(next);
-    } catch (error) {
-      api.error(getErrorMessage(error, "无法切换藏宝阁全屏"));
     }
   };
 
@@ -643,8 +740,11 @@ export function AppLayout({}: AppLayoutProps) {
       }
       dispatch(setDataset(restoredDataset));
       dispatch(setProductUrl(""));
-      await saveRecentDatasetSnapshot(restoredDataset, record.productUrl);
-      await refreshHistory();
+      dispatch(
+        upsertHistoryRecord(
+          await saveRecentDatasetSnapshot(restoredDataset, record.productUrl),
+        ),
+      );
       dispatch(setRestoreNotice("已恢复历史记录数据"));
     } catch (error) {
       api.error(error instanceof Error ? error.message : "历史记录恢复失败");
@@ -666,7 +766,8 @@ export function AppLayout({}: AppLayoutProps) {
     const deletingCurrentRecord = currentRecord?.id === id;
 
     await deleteDatasetHistoryRecord(id);
-    const nextHistory = await loadDatasetHistory();
+    // 直接从当前列表里摘掉即可：整表重读一次要几秒，删除一条不值得。
+    const nextHistory = history.filter((record) => record.id !== id);
     dispatch(setHistory(nextHistory));
 
     if (!deletingCurrentRecord) return;
@@ -674,14 +775,17 @@ export function AppLayout({}: AppLayoutProps) {
     const nextRecord =
       nextHistory[deletedIndex] || nextHistory[deletedIndex - 1] || null;
     if (nextRecord) {
-      dispatch(setDataset(nextRecord.dataset));
-      dispatch(setProductUrl(nextRecord.productUrl));
-      await saveRecentDatasetSnapshotOnly(
-        nextRecord.dataset,
-        nextRecord.productUrl,
-      );
-      dispatch(setRestoreNotice("当前账号已删除，已切换到下一个账号。"));
-      return;
+      const fullNextRecord = await loadDatasetHistoryRecord(nextRecord.id);
+      if (fullNextRecord) {
+        dispatch(setDataset(fullNextRecord.dataset));
+        dispatch(setProductUrl(fullNextRecord.productUrl));
+        await saveRecentDatasetSnapshotOnly(
+          fullNextRecord.dataset,
+          fullNextRecord.productUrl,
+        );
+        dispatch(setRestoreNotice("当前账号已删除，已切换到下一个账号。"));
+        return;
+      }
     }
 
     dispatch(setDataset(emptyDataset));
@@ -714,11 +818,44 @@ export function AppLayout({}: AppLayoutProps) {
           className={`app-layout shell ${hasLoadedProduct ? "has-product" : "no-product"}${isMobile ? " is-mobile" : ""}${isMedium ? " is-medium" : ""}${isWide ? " is-wide" : ""}${isUltraWide ? " is-ultra-wide" : ""}`}
         >
           {holder}
+          {/* 后台耗时（读取商品、读取本机历史）用不挡操作的角标说明进度，不遮住界面。 */}
+          {(updating || historyLoading) && (
+            <div className="app-status-stack">
+              {updating && (
+                <div
+                  className="app-status-pill"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span
+                    className="app-status-pill__spinner"
+                    aria-hidden="true"
+                  />
+                  <span>正在读取账号数据，请稍候…</span>
+                </div>
+              )}
+              {historyLoading && (
+                <div
+                  className="app-status-pill"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span
+                    className="app-status-pill__spinner"
+                    aria-hidden="true"
+                  />
+                  <span>正在加载本机历史记录…</span>
+                </div>
+              )}
+            </div>
+          )}
           {cacheReady && (
             <>
               <PageNavigation
                 guardedPage={pendingPage || guardedPage}
-                showNavigation={hasLoadedProduct || page === "home"}
+                showNavigation={
+                  hasLoadedProduct || page === "home" || page === "settings"
+                }
                 navigationItems={availableNavigationItems}
                 desktopNavigationItems={availableNavigationItems}
                 onNavigate={navigateFromMenu}
@@ -748,7 +885,7 @@ export function AppLayout({}: AppLayoutProps) {
                   <div
                     className="page-route-transition"
                     key={guardedPage}
-                    aria-busy={pageLoading || calculationLoading}
+                    aria-busy={pageLoading || calculationLoading || updating}
                   >
                     {guardedPage === "home" && (
                       <div className="width overview-loader-wrap">
@@ -759,19 +896,13 @@ export function AppLayout({}: AppLayoutProps) {
                           showHistoryTrigger={!hasLoadedProduct}
                           restoreNotice={restoreNotice}
                           onChange={(value) => dispatch(setProductUrl(value))}
-                          onLoad={loadProduct}
+                          onLoad={() => void loadProduct()}
                           onOpenHistory={() => dispatch(setHistoryOpen(true))}
                           onOpenCbgWindow={
                             "__TAURI_INTERNALS__" in window
                               ? () => void openCbgWindow()
                               : undefined
                           }
-                          onToggleCbgFullscreen={
-                            !hasLoadedProduct && "__TAURI_INTERNALS__" in window
-                              ? () => void toggleCbgWindowFullscreen()
-                              : undefined
-                          }
-                          cbgWindowFullscreen={cbgWindowFullscreen}
                           cbgSyncEnabled={cbgSyncEnabled}
                           onToggleCbgSync={
                             "__TAURI_INTERNALS__" in window
@@ -781,8 +912,21 @@ export function AppLayout({}: AppLayoutProps) {
                         />
                       </div>
                     )}
-                    <Outlet context={{ setCalculationLoading }} />
+                    <Outlet
+                      context={{
+                        setCalculationLoading,
+                        themeMode,
+                        onToggleTheme: toggleTheme,
+                        cbgSyncEnabled,
+                        setCbgSyncEnabled,
+                      }}
+                    />
                   </div>
+                  {/*
+                    读取商品要访问藏宝阁（含御魂详情文件，可达几十 MB），耗时不确定。
+                    这里不再用全屏遮罩盖住界面：那会在整个读取期间吞掉所有点击，
+                    看起来就像应用假死。改为不挡操作的右下角进度提示。
+                  */}
                   {(pageLoading || calculationLoading) && (
                     <div
                       className="page-navigation-loading"
@@ -815,6 +959,23 @@ export function AppLayout({}: AppLayoutProps) {
             onClose={() => dispatch(setMaintenanceOpen(false))}
             onUpdate={refreshStaticDataFromMenu}
           />
+          <Modal
+            title="藏宝阁首次使用提示"
+            open={cbgLoginNoticeOpen}
+            onCancel={dismissCbgLoginNotice}
+            footer={
+              <Button type="primary" onClick={dismissCbgLoginNotice}>
+                我知道了
+              </Button>
+            }
+          >
+            <Typography.Paragraph>
+              网易藏宝阁近期调整了风控策略，账号搜索和商品详情读取现在需要有效的藏宝阁登录状态。请先在应用首页点击“藏宝阁”打开窗口并完成登录；如果出现安全验证，也请在该窗口完成后再回来搜索。未登录或登录过期时，可能无法进入账号列表或读取商品详情。
+            </Typography.Paragraph>
+            <Typography.Paragraph>
+              本项目源码已开源。仓库地址以及数据处理、加密说明可在“设置”页查看。
+            </Typography.Paragraph>
+          </Modal>
         </AntLayout>
       </MobileLayoutContext.Provider>
     </ConfigProvider>

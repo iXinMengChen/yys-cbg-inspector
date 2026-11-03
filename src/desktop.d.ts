@@ -8,12 +8,27 @@ declare global {
   interface Window {
     desktop?: {
       getAppVersion(): Promise<string>;
+      hideMainWindow(): Promise<void>;
+      scheduleBackgroundSearch(
+        intervalMinutes: number,
+        taskId: number,
+      ): Promise<void>;
+      setBackgroundSearchRunning(running: boolean): Promise<void>;
       getComputeCapacity(): Promise<{
         logicalCores: number;
         totalMemoryMb: number;
         freeMemoryMb: number;
       }>;
       loadProduct(request: {
+        serverid: string;
+        ordersn: string;
+        channel: CbgChannel;
+        sourceUrl: string;
+        viewLoc?: string;
+        tfid?: string;
+        tcid?: string;
+      }): Promise<unknown>;
+      loadProductRaw(request: {
         serverid: string;
         ordersn: string;
         channel: CbgChannel;
@@ -29,10 +44,30 @@ declare global {
         fullscreen: boolean,
       ): Promise<void>;
       getCbgLoginStatus(channel: CbgChannel): Promise<boolean>;
-      applyCbgRoleSearch(criteria: AccountMatcherCriteria): Promise<{
+      applyCbgRoleSearch(
+        criteria: AccountMatcherCriteria,
+        options?: { background?: boolean },
+      ): Promise<{
         status: "submitted";
         applied: string[];
+        url?: string;
+        localOnlyCriteria?: boolean;
       }>;
+      readCbgRoleResults(): Promise<{
+        status:
+          | "ready"
+          | "empty"
+          | "loading"
+          | "login_required"
+          | "security_check"
+          | "not_role_search";
+        pageUrl?: string;
+        pageKey?: string;
+        siteNotice?: string;
+        candidates?: { url: string; summary?: string }[];
+        hasNext?: boolean;
+      }>;
+      nextCbgRoleResultsPage(): Promise<boolean>;
       takeCbgPageCapture(): Promise<{
         pageUrl: string;
         payload: unknown;

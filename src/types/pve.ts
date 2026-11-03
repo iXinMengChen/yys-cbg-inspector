@@ -16,6 +16,13 @@ export type PveScoredRelic = {
   maximumEffectiveCount: 8 | 11;
 };
 
+export type PveSuitScoreSummary = {
+  suitName: string;
+  totalScore: number;
+  relicCount: number;
+  isOma: boolean;
+};
+
 export type PveHighScoreGroup = {
   position: number;
   relics: PveScoredRelic[];

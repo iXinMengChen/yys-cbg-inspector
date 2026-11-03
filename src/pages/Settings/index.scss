@@ -1,0 +1,83 @@
+.settings-page {
+  box-sizing: border-box;
+  display: flex;
+  min-height: calc(100dvh - 88px);
+  flex-direction: column;
+  padding: 18px 20px 16px;
+
+  &__card {
+    width: 100%;
+    border-color: var(--modern-line);
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgb(var(--modern-shadow-rgb) / 7%);
+
+    .ant-card-body {
+      padding: 10px 26px;
+    }
+  }
+
+  &__section {
+    h2 {
+      margin: 0;
+      padding: 18px 0 10px;
+      color: var(--modern-ink);
+      font-size: 15px;
+    }
+
+    & + & {
+      margin-top: 8px;
+      border-top: 1px solid var(--modern-line);
+    }
+  }
+
+  &__row {
+    display: flex;
+    min-height: 76px;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    padding: 14px 0;
+    border-top: 1px solid var(--modern-line);
+  }
+
+  &__copy {
+    display: flex;
+    min-width: 220px;
+    flex: 1 1 380px;
+    flex-direction: column;
+    gap: 5px;
+
+    strong {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--modern-ink);
+      font-size: 14px;
+    }
+
+    .ant-typography {
+      font-size: 12px;
+      line-height: 1.6;
+    }
+  }
+
+  &__control {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+
+    .ant-select {
+      width: 220px;
+    }
+  }
+
+  &__fixed-value {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--modern-muted);
+    font-size: 13px;
+  }
+}

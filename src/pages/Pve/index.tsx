@@ -11,9 +11,15 @@ import type { HeroStaticPayload } from "@/types/calculator";
 import { assetUrl } from "@/lib/assetUrl";
 import { loadHeroPanels, loadRelicSuits } from "@/lib/staticApi";
 import { useAppSelector } from "@/store";
-import type { RelicDataset, RelicView } from "@/types";
+import type { RelicDataset } from "@/types";
 import { HighScoreRelicList } from "./HighScoreRelicList";
 import { SuitPickerModal } from "./SuitPickerModal";
+import {
+  defaultFourPieceSuitNames,
+  fixedOmaSuitNames,
+  getPveEffectiveGrowthTotal,
+  scorePveRelic,
+} from "@/lib/pveSuitRanking";
 import type {
   PveHighScoreGroup,
   PveMetric,
@@ -27,18 +33,6 @@ import type {
 
 const pveFourPieceSelectionStorageKey =
   "yys-cbg-inspector:pve-four-piece-selection-v1";
-
-export const defaultFourPieceSuitNames = [
-  "狂骨",
-  "海月火玉",
-  "伤魂鸟",
-  "破势",
-  "隐念",
-  "镇墓兽",
-  "片叶之苇",
-];
-export const fixedOmaSuitNames = ["土蜘蛛", "荒骷髅", "鬼灵歌伎"];
-const pveEffectiveAttributeLabels = new Set(["攻击加成", "暴击", "暴击伤害"]);
 
 type RelicSuitStaticPayload = {
   yuhun_list?: Array<
@@ -121,133 +115,6 @@ function preloadSuitImages(
       const image = new Image();
       image.src = assetUrl(`suits/${suit.id}.png`);
     });
-}
-
-/**
- * PVE 输出御魂只认攻击加成、暴击和暴击伤害三类副属性。
- * rattr 已保留初始副属性和每次强化，因此 totals.count 就是实际有效词条数。
- */
-function getPveEffectiveSubAttributeCount(relic: RelicView) {
-  const totals = relic.enhancement?.totals;
-  if (totals?.length) {
-    return totals.reduce(
-      (count, attribute) =>
-        count +
-        (pveEffectiveAttributeLabels.has(attribute.label)
-          ? attribute.count
-          : 0),
-      0,
-    );
-  }
-
-  return (relic.subAttributes || []).filter((attribute) =>
-    pveEffectiveAttributeLabels.has(attribute.label),
-  ).length;
-}
-
-function getPveEffectiveGrowthTotal(relic: RelicView) {
-  const totals = relic.enhancement?.totals;
-  if (totals?.length) {
-    return totals.reduce(
-      (total, attribute) =>
-        total +
-        (pveEffectiveAttributeLabels.has(attribute.label)
-          ? attribute.total
-          : 0),
-      0,
-    );
-  }
-
-  return (relic.subAttributes || []).reduce(
-    (total, attribute) =>
-      total +
-      (pveEffectiveAttributeLabels.has(attribute.label) ? attribute.value : 0),
-    0,
-  );
-}
-
-function scorePveRelic(relic: RelicView): PveScoredRelic | null {
-  const position = relic.position || 0;
-  const isOmaRelic = Boolean(relic.setBonusAttribute);
-  const isOutputOmaBonus =
-    isOmaRelic &&
-    pveEffectiveAttributeLabels.has(relic.setBonusAttribute?.label || "");
-
-  if (
-    relic.quality !== 6 ||
-    relic.level !== 15 ||
-    ([2, 4].includes(position) && relic.mainAttribute?.label !== "攻击加成") ||
-    (position === 6 &&
-      !["暴击", "暴击伤害"].includes(relic.mainAttribute?.label || ""))
-  ) {
-    return null;
-  }
-
-  return {
-    relic,
-    effectiveCount:
-      getPveEffectiveSubAttributeCount(relic) + (isOutputOmaBonus ? 3 : 0),
-    maximumEffectiveCount: isOutputOmaBonus ? 11 : 8,
-  };
-}
-
-export type PveSuitScoreSummary = {
-  suitName: string;
-  totalScore: number;
-  relicCount: number;
-  isOma: boolean;
-};
-
-/** 首页与 PVE 页面共用的常用御魂评分汇总，评分规则保持单一来源。 */
-export function getPveSuitScoreRanking(
-  dataset: RelicDataset,
-): PveSuitScoreSummary[] {
-  const fourPieceSuitNames = new Set<string>();
-  Object.values(dataset.relicsByPosition || {})
-    .flat()
-    .forEach((relic) => {
-      const suit = relic.suit;
-      if (!suit || relic.setBonusAttribute || suit.isTwoPieceSet) return;
-      fourPieceSuitNames.add(suit.name);
-    });
-
-  const preferredFourPieceSuitNames = defaultFourPieceSuitNames.filter((name) =>
-    fourPieceSuitNames.has(name),
-  );
-  const activeFourPieceSuitNames = preferredFourPieceSuitNames.length
-    ? preferredFourPieceSuitNames
-    : [...fourPieceSuitNames].slice(0, 7);
-  const selectedSuitNames = new Set([
-    ...activeFourPieceSuitNames,
-    ...fixedOmaSuitNames,
-  ]);
-  const scores = new Map<string, PveSuitScoreSummary>();
-
-  Object.values(dataset.relicsByPosition || {})
-    .flat()
-    .map(scorePveRelic)
-    .filter((item): item is PveScoredRelic => Boolean(item))
-    .filter((item) => selectedSuitNames.has(item.relic.suit?.name || ""))
-    .filter((item) => item.effectiveCount >= 5)
-    .forEach((item) => {
-      const suitName = item.relic.suit?.name || "未知御魂";
-      const current = scores.get(suitName) || {
-        suitName,
-        totalScore: 0,
-        relicCount: 0,
-        isOma: fixedOmaSuitNames.includes(suitName),
-      };
-      current.totalScore += item.effectiveCount;
-      current.relicCount += 1;
-      scores.set(suitName, current);
-    });
-
-  return [...activeFourPieceSuitNames, ...fixedOmaSuitNames].flatMap(
-    (suitName) => {
-      const score = scores.get(suitName);
-      return score ? [score] : [];
-    },
-  );
 }
 
 function updatePrecomputedRow(

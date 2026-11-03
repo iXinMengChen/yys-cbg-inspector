@@ -8,7 +8,7 @@ import "./index.scss";
 const developmentVersion = "开发环境";
 
 /** 展示由 Tauri 读取的应用版本，避免与打包版本号重复维护。 */
-export function AboutPage() {
+export function AboutSection() {
   const [version, setVersion] = useState(developmentVersion);
   const [isDesktop, setIsDesktop] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
@@ -85,22 +85,19 @@ export function AboutPage() {
   };
 
   return (
-    <main className="width result about-page">
-      <header className="page-heading">
-        <div>
-          <h1>关于</h1>
-        </div>
-      </header>
-
-      <Card className="about-page__card">
-        <div className="about-page__identity">
-          <span className="about-page__icon" aria-hidden="true">
+    <section className="settings-about" aria-labelledby="settings-about-title">
+      <h2 id="settings-about-title" className="settings-about__title">
+        关于号来
+      </h2>
+      <Card className="settings-about__card">
+        <div className="settings-about__identity">
+          <span className="settings-about__icon" aria-hidden="true">
             <DesktopOutlined />
           </span>
           <div>
             <Typography.Title level={2}>号来</Typography.Title>
             <Typography.Paragraph
-              className="about-page__description"
+              className="settings-about__description"
               type="secondary"
             >
               号来是一款用于查看阴阳师藏宝阁账号的桌面工具，将账号资料、式神、御魂库存与御魂计算集中呈现，帮助你更直观地判断账号练度与御魂潜力。
@@ -108,7 +105,7 @@ export function AboutPage() {
           </div>
         </div>
 
-        <div className="about-page__version">
+        <div className="settings-about__version">
           <span>
             <InfoCircleOutlined /> 当前版本
           </span>
@@ -116,7 +113,7 @@ export function AboutPage() {
         </div>
 
         {isDesktop && (
-          <div className="about-page__version">
+          <div className="settings-about__version">
             <span>软件更新</span>
             <Space>
               {updateStatus && (
@@ -137,7 +134,7 @@ export function AboutPage() {
         )}
 
         {isDesktop && (
-          <section className="about-page__cbg-listener">
+          <section className="settings-about__cbg-listener">
             <div>
               <strong>桌面端自动读取</strong>
               <Typography.Paragraph type="secondary">
@@ -148,7 +145,29 @@ export function AboutPage() {
         )}
 
         <section
-          className="about-page__prologue"
+          className="settings-about__privacy"
+          aria-labelledby="about-privacy-title"
+        >
+          <h2 id="about-privacy-title">数据处理与加密</h2>
+          <ul>
+            <li>
+              查询和读取商品时会访问网易藏宝阁。成功读取商品后，应用会自动把商品链接和生成的账号摘要提交到项目服务器的账号摘要库；提交内容不包含藏宝阁密码或登录
+              Cookie，因此当前版本并非完全不上传数据。
+            </li>
+            <li>
+              账号快照、历史记录和应用偏好保存在本机 IndexedDB 或
+              localStorage；应用没有对这些本地数据额外加密。
+            </li>
+            <li>
+              Windows 桌面版为恢复藏宝阁登录状态，会将会话 Cookie 的本机副本使用
+              Windows DPAPI 加密后保存在应用数据目录。该加密由当前 Windows
+              用户账户保护，不会把密码或 Cookie 提交到项目服务器。
+            </li>
+          </ul>
+        </section>
+
+        <section
+          className="settings-about__prologue"
           aria-labelledby="about-prologue-title"
         >
           <h2 id="about-prologue-title">《号来》</h2>
@@ -165,6 +184,6 @@ export function AboutPage() {
           <p>号来。来者不拒。来者，皆是过客。</p>
         </section>
       </Card>
-    </main>
+    </section>
   );
 }

@@ -137,6 +137,15 @@ export type GameConfig = {
   collection_skin_data?: Record<string, string>;
 };
 
+/**
+ * 藏宝阁原始数据转换成数据集时的选项。
+ * accountOnly 只保留账号概览：商品列表页只需要账号字段，跳过御魂库存可以少走一遍
+ * 体量最大的数据，避免为了几十个字段解析整包御魂详情。
+ */
+export type CbgPayloadConversionOptions = {
+  accountOnly?: boolean;
+};
+
 export * from "./calculator";
 export * from "./heroSkills";
 export * from "./home";

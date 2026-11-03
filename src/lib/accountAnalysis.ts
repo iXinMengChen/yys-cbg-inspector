@@ -168,12 +168,12 @@ function relicSpeedContribution(relic: RelicView, includeMainSpeed = true) {
 }
 
 function bestRelicForSpeed(relics: RelicView[], includeMainSpeed = true) {
-  return relics
-    .map((relic) => ({
-      relic,
-      speed: relicSpeedContribution(relic, includeMainSpeed),
-    }))
-    .sort((left, right) => right.speed - left.speed)[0];
+  let best: { relic: RelicView; speed: number } | undefined;
+  for (const relic of relics) {
+    const speed = relicSpeedContribution(relic, includeMainSpeed);
+    if (!best || speed > best.speed) best = { relic, speed };
+  }
+  return best;
 }
 
 function speedCombinationFor(
@@ -220,36 +220,39 @@ function speedCombinationFor(
       ),
   );
   if (positionCandidates.some((items) => !items.length)) return null;
+  const bestByPosition = positionCandidates.map((items) =>
+    bestRelicForSpeed(items, includeMainSpeed),
+  );
 
   // 无套装要求时，各个号位完全独立，直接取每个位置的速度最大值即为精确解。
   if (!requiredSuit) {
-    const choices = positionCandidates.map((items) =>
-      bestRelicForSpeed(items, includeMainSpeed),
-    );
-    if (choices.some((choice) => !choice)) return null;
     return {
-      value: choices.reduce((total, choice) => total + (choice?.speed || 0), 0),
-      relics: choices.map((choice) =>
+      value: bestByPosition.reduce(
+        (total, choice) => total + (choice?.speed || 0),
+        0,
+      ),
+      relics: bestByPosition.map((choice) =>
         evidenceFor(choice!.relic, choice!.speed),
       ),
     };
   }
 
   // 四件套只需要在 6 个位置中选定 4 个。枚举 15 种位置分配后，
-  // 每个位置仍独立取最优，因此不会因为候选裁剪而损失精度。
+  // 每个位置先求好“任意御魂”和“指定套装”的最优候选，避免每种分配都重新排序。
+  const bestSuitByPosition = positionCandidates.map((items) =>
+    bestRelicForSpeed(
+      items.filter((relic) => relic.suit?.name === requiredSuit),
+      includeMainSpeed,
+    ),
+  );
   let best: SpeedCombination | null = null;
   for (let mask = 0; mask < 1 << positions.length; mask += 1) {
     if (
       positions.filter((_, index) => Boolean(mask & (1 << index))).length !== 4
     )
       continue;
-    const choices = positionCandidates.map((items, index) =>
-      bestRelicForSpeed(
-        mask & (1 << index)
-          ? items.filter((relic) => relic.suit?.name === requiredSuit)
-          : items,
-        includeMainSpeed,
-      ),
+    const choices = bestByPosition.map((choice, index) =>
+      mask & (1 << index) ? bestSuitByPosition[index] : choice,
     );
     if (choices.some((choice) => !choice)) continue;
     const candidate: SpeedCombination = {

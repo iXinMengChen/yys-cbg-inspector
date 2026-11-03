@@ -1,17 +1,16 @@
 import {
   AppstoreOutlined,
   CalculatorOutlined,
+  ControlOutlined,
   DashboardOutlined,
   FundProjectionScreenOutlined,
   HomeOutlined,
-  InfoCircleOutlined,
   SearchOutlined,
   SettingOutlined,
   StarOutlined,
 } from "@ant-design/icons";
 import { Navigate } from "react-router-dom";
 import { AppLayout } from "@/components/Layout";
-import { AboutPage } from "@/pages/About";
 import { AccountMatcherPage } from "@/pages/AccountMatcher";
 import { CalculatorWorkspace } from "@/pages/Calculator";
 import { CbgWindowPage } from "@/pages/CbgWindow";
@@ -21,6 +20,7 @@ import { MaintenancePage } from "@/pages/Maintenance";
 import { PvePage } from "@/pages/Pve";
 import { RelicsPage } from "@/pages/Relics";
 import { SpeedPage } from "@/pages/Speed";
+import { SettingsPage } from "@/pages/Settings";
 import type {
   AppNavigationItem,
   AppRoute,
@@ -81,21 +81,22 @@ const pageRoutes: readonly AppRouteTableEntry[] = [
     element: <RelicsPage />,
   },
   {
+    route: "settings",
+    path: "/settings",
+    menu: { label: "设置", icon: ControlOutlined },
+    element: <SettingsPage />,
+  },
+  {
     route: "maintenance",
     path: "/maintenance",
     menu: { label: "维护", icon: SettingOutlined },
     element: <MaintenancePage />,
   },
-  {
-    route: "about",
-    path: "/about",
-    menu: { label: "关于", icon: InfoCircleOutlined },
-    element: <AboutPage />,
-  },
   { path: "*", element: <Navigate to="/home" replace /> },
 ];
 
 export const routes: readonly AppRouteTableEntry[] = [
+  { path: "/about", element: <Navigate to="/settings" replace /> },
   { path: "/cbg-window", element: <CbgWindowPage /> },
   {
     element: <AppLayout />,
@@ -121,12 +122,8 @@ export const navigationItems: AppNavigationItem[] = pageRouteEntries.flatMap(
 );
 
 export const desktopNavigationItems = navigationItems.filter(
-  (item) => item.route !== "about" && item.route !== "maintenance",
+  (item) => item.route !== "maintenance",
 );
-
-export const aboutNavigationItem = navigationItems.find(
-  (item) => item.route === "about",
-)!;
 
 export const maintenanceNavigationItem = navigationItems.find(
   (item) => item.route === "maintenance",

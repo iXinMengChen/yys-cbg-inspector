@@ -796,6 +796,42 @@
   }
 }
 
+/* 后台加载（读取商品、读取本机历史记录）不应该用整屏遮罩挡住操作，改用右下角常驻提示。
+   旋转动画走 transform，主线程繁忙时合成器仍能继续播放，加载状态不会看起来静止。 */
+.app-status-stack {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.app-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border: 1px solid var(--modern-line);
+  border-radius: 999px;
+  background: var(--modern-surface-solid);
+  box-shadow: var(--modern-shadow);
+  color: var(--modern-muted);
+  font-size: 13px;
+  pointer-events: none;
+
+  &__spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--modern-accent-soft);
+    border-top-color: var(--modern-accent-fill);
+    border-radius: 50%;
+    animation: page-navigation-loading-spin 700ms linear infinite;
+  }
+}
+
 /* 页面切换由页面级 loading 提示接管，内容渲染不再叠加旧的进场动画。 */
 .page-route-transition {
   container-type: inline-size;

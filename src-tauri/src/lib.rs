@@ -2,7 +2,10 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sysinfo::System;
 use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, WebviewBuilder, WebviewUrl,
     WebviewWindowBuilder,
 };
@@ -23,9 +28,11 @@ const STATIC_ASSET_TIMEOUT: Duration = Duration::from_secs(10);
 const CBG_PAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CBG_EQUIP_DESC_BASE_URL: &str =
     "https://cbg-other-desc.res.netease.com/yys/static/equipdesc/";
+const CBG_SERVER_LIST_URL: &str = "https://cbg-yys.res.netease.com/js/server_list_data.js";
 const MAX_CBG_EQUIP_DESC_BYTES: usize = 32 * 1024 * 1024;
 const CBG_SHELL_LABEL: &str = "cbg-shell";
 const CBG_BROWSER_LABEL: &str = "cbg-browser";
+static BACKGROUND_SEARCH_RUNNING: AtomicBool = AtomicBool::new(false);
 static CBG_WINDOW_CREATION_LOCK: Mutex<()> = Mutex::new(());
 const CBG_CAPTURE_SCRIPT: &str = r#"(() => {
   const allowedHosts = new Set([
@@ -559,6 +566,7 @@ fn static_data_path<R: tauri::Runtime>(
     let file_name = match endpoint {
         "/static/heroes" => "heroes.json",
         "/static/relic-suits" => "relic-suits.json",
+        "/static/server-list" => "server-list.json",
         _ => return invalid_endpoint(endpoint),
     };
     let root = app
@@ -742,6 +750,98 @@ fn write_static_json<R: tauri::Runtime>(
     fs::create_dir_all(parent).map_err(|_| "静态数据目录创建失败".to_owned())?;
     let content = serde_json::to_vec_pretty(data).map_err(|_| "静态数据格式异常".to_owned())?;
     fs::write(file_path, content).map_err(|_| "静态数据保存失败".to_owned())
+}
+
+fn parse_server_list_script(script: &str) -> Result<Value, String> {
+    let declaration = script
+        .find("server_data")
+        .ok_or_else(|| "区服脚本中缺少 server_data".to_owned())?;
+    let tail = &script[declaration..];
+    let start = tail
+        .find('{')
+        .ok_or_else(|| "区服脚本数据格式异常".to_owned())?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = None;
+    for (offset, character) in tail[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else {
+            match character {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(start + offset + character.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let end = end.ok_or_else(|| "区服脚本数据不完整".to_owned())?;
+    let raw = &tail[start..end];
+    let source_data: Value =
+        serde_json::from_str(raw).map_err(|_| "区服脚本数据格式异常".to_owned())?;
+    let groups = source_data
+        .as_object()
+        .ok_or_else(|| "区服脚本数据格式异常".to_owned())?;
+    let mut result = serde_json::Map::new();
+    for entry in groups.values() {
+        let metadata = entry
+            .get(0)
+            .and_then(Value::as_array)
+            .ok_or_else(|| "区服分组格式异常".to_owned())?;
+        let group_name = metadata
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| "区服分组名称无效".to_owned())?;
+        let server_rows = entry
+            .get(1)
+            .and_then(Value::as_array)
+            .ok_or_else(|| "区服列表格式异常".to_owned())?;
+        let mut servers = serde_json::Map::new();
+        for row in server_rows {
+            let fields = row
+                .as_array()
+                .ok_or_else(|| "区服条目格式异常".to_owned())?;
+            let id = match fields.first() {
+                Some(Value::String(value)) => value.clone(),
+                Some(Value::Number(value)) => value.to_string(),
+                _ => return Err("区服 ID 无效".to_owned()),
+            };
+            let name = fields
+                .get(1)
+                .and_then(Value::as_str)
+                .ok_or_else(|| "区服名称无效".to_owned())?;
+            let name = if group_name == "网易-双平台" {
+                name.strip_prefix("网易-").unwrap_or(name)
+            } else {
+                name
+            };
+            if id.is_empty() || !id.chars().all(|character| character.is_ascii_digit()) {
+                return Err("区服 ID 无效".to_owned());
+            }
+            servers.insert(name.to_owned(), Value::String(id));
+        }
+        if servers.is_empty() {
+            return Err("区服列表为空".to_owned());
+        }
+        result.insert(group_name.to_owned(), Value::Object(servers));
+    }
+    if result.is_empty() {
+        return Err("区服列表为空".to_owned());
+    }
+    Ok(Value::Object(result))
 }
 
 fn not_found_response() -> Response<Vec<u8>> {
@@ -961,12 +1061,13 @@ async fn toggle_cbg_window(app: tauri::AppHandle, channel: CbgChannel) -> Result
             .map_err(|error| format!("无法读取藏宝阁全屏状态：{error}"));
     }
 
-    create_cbg_window(&app, channel).map(|_| false)
+    create_cbg_window(&app, channel, true).map(|_| false)
 }
 
 fn create_cbg_window(
     app: &tauri::AppHandle,
     channel: CbgChannel,
+    visible: bool,
 ) -> Result<tauri::WebviewWindow, String> {
     let _creation_guard = CBG_WINDOW_CREATION_LOCK
         .lock()
@@ -974,9 +1075,13 @@ fn create_cbg_window(
     if let Some(window) = app.get_webview_window(CBG_SHELL_LABEL) {
         window
             .emit("cbg-window:channel", channel.label())
-            .and_then(|()| window.show())
-            .and_then(|()| window.set_focus())
             .map_err(|error| format!("无法显示独立藏宝阁窗口：{error}"))?;
+        if visible {
+            window
+                .show()
+                .and_then(|()| window.set_focus())
+                .map_err(|error| format!("无法显示独立藏宝阁窗口：{error}"))?;
+        }
         return Ok(window);
     }
 
@@ -988,7 +1093,8 @@ fn create_cbg_window(
         .title("藏宝阁")
         .inner_size(960.0, 800.0)
         .min_inner_size(720.0, 560.0)
-        .resizable(true);
+        .resizable(true)
+        .visible(visible);
     let builder = if let Some((x, y)) = cbg_window_position(&app) {
         builder.position(x, y)
     } else {
@@ -997,11 +1103,55 @@ fn create_cbg_window(
     let window = builder
         .build()
         .map_err(|error| format!("无法打开独立藏宝阁窗口：{error}"))?;
-    window
-        .show()
-        .and_then(|()| window.set_focus())
-        .map_err(|error| format!("无法显示独立藏宝阁窗口：{error}"))?;
+    if visible {
+        window
+            .show()
+            .and_then(|()| window.set_focus())
+            .map_err(|error| format!("无法显示独立藏宝阁窗口：{error}"))?;
+    }
     Ok(window)
+}
+
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主程序窗口".to_owned())?;
+    window
+        .hide()
+        .map_err(|error| format!("无法隐藏主程序窗口：{error}"))
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window
+            .show()
+            .and_then(|()| window.unminimize())
+            .and_then(|()| window.set_focus());
+    }
+}
+
+#[tauri::command]
+fn schedule_background_search(
+    app: tauri::AppHandle,
+    interval_minutes: u64,
+    task_id: u64,
+) -> Result<(), String> {
+    let delay = Duration::from_secs(interval_minutes.clamp(5, 24 * 60) * 60);
+    std::thread::Builder::new()
+        .name("cbg-background-search-timer".to_owned())
+        .spawn(move || {
+            // shortcut: 停止时忽略旧任务事件，计时线程会睡到间隔结束；频繁启停时再换可取消调度器。
+            std::thread::sleep(delay);
+            let _ = app.emit("background-search:tick", task_id);
+        })
+        .map(|_| ())
+        .map_err(|error| format!("无法安排下一轮后台搜索：{error}"))
+}
+
+#[tauri::command]
+fn set_background_search_running(running: bool) {
+    BACKGROUND_SEARCH_RUNNING.store(running, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -1024,7 +1174,7 @@ async fn set_cbg_webview(
             .ok()
             .and_then(|current| current.host_str().map(str::to_owned))
             .unwrap_or_default();
-        if !channel.accepts_source_host(&current_host) {
+        if !current_host.is_empty() && !channel.accepts_source_host(&current_host) {
             if let Some(cookies) = load_cbg_cookies(&app, channel).ok().flatten() {
                 if has_saved_cbg_login_cookie(&cookies) {
                     restore_cbg_cookies(&webview, channel, &cookies)?;
@@ -1079,7 +1229,7 @@ async fn set_cbg_window_fullscreen(
 ) -> Result<(), String> {
     let window = match app.get_webview_window(CBG_SHELL_LABEL) {
         Some(window) => window,
-        None if fullscreen => create_cbg_window(&app, channel)?,
+        None if fullscreen => create_cbg_window(&app, channel, true)?,
         None => return Ok(()),
     };
     if fullscreen {
@@ -1203,29 +1353,58 @@ async fn get_cbg_login_status(app: tauri::AppHandle, channel: CbgChannel) -> Res
     )
 }
 
+fn is_supported_cbg_source_host(host: &str) -> bool {
+    [
+        CbgChannel::Official,
+        CbgChannel::Huawei,
+        CbgChannel::Oppo,
+        CbgChannel::Vivo,
+        CbgChannel::Xiaomi,
+    ]
+    .iter()
+    .any(|channel| channel.accepts_source_host(host))
+}
+
 #[tauri::command]
-async fn apply_cbg_role_search(app: tauri::AppHandle, criteria: Value) -> Result<Value, String> {
-    if app.get_webview_window(CBG_SHELL_LABEL).is_none()
-        && app.get_window(CBG_SHELL_LABEL).is_none()
-    {
-        if let Err(error) = create_cbg_window(&app, CbgChannel::Official) {
+async fn apply_cbg_role_search(
+    app: tauri::AppHandle,
+    criteria: Value,
+    background: Option<bool>,
+) -> Result<Value, String> {
+    let background = background.unwrap_or(false);
+    let missing_shell = app.get_webview_window(CBG_SHELL_LABEL).is_none()
+        && app.get_window(CBG_SHELL_LABEL).is_none();
+    if missing_shell {
+        if let Err(error) = create_cbg_window(&app, CbgChannel::Official, !background) {
             if app.get_window(CBG_SHELL_LABEL).is_none() {
                 return Err(error);
             }
         }
     }
-    if let Some(window) = app.get_webview_window(CBG_SHELL_LABEL) {
+    if !background {
+        if let Some(window) = app.get_webview_window(CBG_SHELL_LABEL) {
+            window
+                .unminimize()
+                .and_then(|()| window.show())
+                .and_then(|()| window.set_focus())
+                .map_err(|error| format!("无法显示藏宝阁窗口：{error}"))?;
+        } else if let Some(window) = app.get_window(CBG_SHELL_LABEL) {
+            window
+                .unminimize()
+                .and_then(|()| window.show())
+                .and_then(|()| window.set_focus())
+                .map_err(|error| format!("无法显示藏宝阁窗口：{error}"))?;
+        } else {
+            return Err("藏宝阁窗口创建后仍不可用".to_owned());
+        }
+    } else if let Some(window) = app.get_webview_window(CBG_SHELL_LABEL) {
         window
-            .unminimize()
-            .and_then(|()| window.show())
-            .and_then(|()| window.set_focus())
-            .map_err(|error| format!("无法显示藏宝阁窗口：{error}"))?;
+            .hide()
+            .map_err(|error| format!("无法隐藏藏宝阁窗口：{error}"))?;
     } else if let Some(window) = app.get_window(CBG_SHELL_LABEL) {
         window
-            .unminimize()
-            .and_then(|()| window.show())
-            .and_then(|()| window.set_focus())
-            .map_err(|error| format!("无法显示藏宝阁窗口：{error}"))?;
+            .hide()
+            .map_err(|error| format!("无法隐藏藏宝阁窗口：{error}"))?;
     } else {
         return Err("藏宝阁窗口创建后仍不可用".to_owned());
     }
@@ -1284,7 +1463,19 @@ async fn apply_cbg_role_search(app: tauri::AppHandle, criteria: Value) -> Result
     }
     let criteria_literal =
         serde_json::to_string(&criteria_json).map_err(|_| "筛选条件格式无效".to_owned())?;
-    let script = include_str!("cbg_role_search.js").replace("__CRITERIA_JSON__", &criteria_literal);
+    let server_ids = read_static_data(app.clone(), "/static/server-list".to_owned())?
+        .filter(Value::is_object)
+        .unwrap_or_else(|| {
+            serde_json::from_str(include_str!("cbg_server_ids.json"))
+                .expect("内置区服映射必须是有效 JSON")
+        });
+    let server_ids_json =
+        serde_json::to_string(&server_ids).map_err(|_| "区服映射格式无效".to_owned())?;
+    let server_ids_literal =
+        serde_json::to_string(&server_ids_json).map_err(|_| "区服映射格式无效".to_owned())?;
+    let script = include_str!("cbg_role_search.js")
+        .replace("__CRITERIA_JSON__", &criteria_literal)
+        .replace("__SERVER_IDS_JSON__", &server_ids_literal);
 
     let mut result = evaluate_cbg_webview(&webview, &script).await;
     let mut retried_page_error = false;
@@ -1383,6 +1574,108 @@ async fn apply_cbg_role_search(app: tauri::AppHandle, criteria: Value) -> Result
         Some("navigating") => Err("藏宝阁筛选页仍在加载，请稍后重试".to_owned()),
         _ => Err("没有识别到藏宝阁角色筛选页，请在窗口中打开“角色筛选”后重试".to_owned()),
     }
+}
+
+#[tauri::command]
+async fn read_cbg_role_results(app: tauri::AppHandle) -> Result<Value, String> {
+    let webview = app
+        .get_webview(CBG_BROWSER_LABEL)
+        .ok_or_else(|| "藏宝阁窗口当前不可用".to_owned())?;
+    let host = webview
+        .url()
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    if !is_supported_cbg_source_host(&host) {
+        return Err("当前页面不是受支持的藏宝阁页面".to_owned());
+    }
+    let script = include_str!("cbg_role_results.js").replace("__ACTION__", "\"read\"");
+    evaluate_cbg_webview(&webview, &script).await
+}
+
+#[tauri::command]
+async fn next_cbg_role_results_page(app: tauri::AppHandle) -> Result<bool, String> {
+    let webview = app
+        .get_webview(CBG_BROWSER_LABEL)
+        .ok_or_else(|| "藏宝阁窗口当前不可用".to_owned())?;
+    let host = webview
+        .url()
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    if !is_supported_cbg_source_host(&host) {
+        return Err("当前页面不是受支持的藏宝阁页面".to_owned());
+    }
+
+    let read_script = include_str!("cbg_role_results.js").replace("__ACTION__", "\"read\"");
+    let before = evaluate_cbg_webview(&webview, &read_script).await?;
+    if !matches!(
+        before.get("status").and_then(Value::as_str),
+        Some("ready" | "empty")
+    ) {
+        return Err("藏宝阁角色结果页尚未就绪".to_owned());
+    }
+    let before_key = before
+        .get("pageKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let candidate_signature = |page: &Value| {
+        let candidates = page.get("candidates").and_then(Value::as_array);
+        let first = candidates
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("url"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let last = candidates
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("url"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        (candidates.map_or(0, Vec::len), first, last)
+    };
+    let before_candidates = candidate_signature(&before);
+    let next_script = include_str!("cbg_role_results.js").replace("__ACTION__", "\"next\"");
+    let action = evaluate_cbg_webview(&webview, &next_script).await?;
+    let action_status = action.get("status").and_then(Value::as_str);
+    match action_status {
+        Some("done") => return Ok(false),
+        Some("clicking" | "scrolling" | "waiting") => {}
+        _ => return Err("没有找到藏宝阁结果页的下一页按钮".to_owned()),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let page = evaluate_cbg_webview(&webview, &read_script).await?;
+        let page_key = page
+            .get("pageKey")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if matches!(
+            page.get("status").and_then(Value::as_str),
+            Some("ready" | "empty")
+        ) {
+            if action_status == Some("clicking") && page_key != before_key {
+                return Ok(true);
+            }
+            if action_status != Some("clicking") {
+                if candidate_signature(&page) != before_candidates {
+                    return Ok(true);
+                }
+                if page.get("hasNext").and_then(Value::as_bool) == Some(false) {
+                    return Ok(false);
+                }
+            }
+        }
+        tauri::async_runtime::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(350));
+        })
+        .await
+        .map_err(|_| "等待藏宝阁下一页时发生错误".to_owned())?;
+    }
+    Err("藏宝阁下一页加载超时，请确认页面仍可正常浏览".to_owned())
 }
 
 async fn evaluate_cbg_webview(webview: &tauri::Webview, script: &str) -> Result<Value, String> {
@@ -1610,8 +1903,10 @@ async fn attach_cbg_equip_desc(payload: &mut Value, ordersn: &str) -> Result<(),
     Ok(())
 }
 
-#[tauri::command]
-async fn load_product(app: tauri::AppHandle, request: ProductRequest) -> Result<Value, String> {
+async fn load_product_payload(
+    app: tauri::AppHandle,
+    request: ProductRequest,
+) -> Result<Value, String> {
     let ProductRequest {
         serverid,
         ordersn,
@@ -1818,6 +2113,20 @@ async fn load_product(app: tauri::AppHandle, request: ProductRequest) -> Result<
 }
 
 #[tauri::command]
+async fn load_product(app: tauri::AppHandle, request: ProductRequest) -> Result<Value, String> {
+    load_product_payload(app, request).await
+}
+
+#[tauri::command]
+async fn load_product_raw(
+    app: tauri::AppHandle,
+    request: ProductRequest,
+) -> Result<String, String> {
+    let payload = load_product_payload(app, request).await?;
+    serde_json::to_string(&payload).map_err(|_| "无法序列化藏宝阁商品数据".to_owned())
+}
+
+#[tauri::command]
 fn read_static_data(app: tauri::AppHandle, endpoint: String) -> Result<Option<Value>, String> {
     let file_path = static_data_path(&app, &endpoint)?;
     let Ok(content) = fs::read_to_string(file_path) else {
@@ -1829,7 +2138,12 @@ fn read_static_data(app: tauri::AppHandle, endpoint: String) -> Result<Option<Va
 #[tauri::command]
 async fn update_static_data(app: tauri::AppHandle, endpoint: String) -> Result<Value, String> {
     static_data_path(&app, &endpoint)?;
-    let url = format!("{REMOTE_API_BASE_URL}{endpoint}");
+    let is_server_list = endpoint == "/static/server-list";
+    let url = if is_server_list {
+        CBG_SERVER_LIST_URL.to_owned()
+    } else {
+        format!("{REMOTE_API_BASE_URL}{endpoint}")
+    };
     log_api!(&format!("update_static_data 请求：GET {url}"));
     let client = Client::builder()
         .timeout(API_TIMEOUT)
@@ -1837,7 +2151,14 @@ async fn update_static_data(app: tauri::AppHandle, endpoint: String) -> Result<V
         .map_err(|_| "远程请求客户端初始化失败".to_owned())?;
     let response = match client
         .get(&url)
-        .header("accept", "application/json")
+        .header(
+            "accept",
+            if is_server_list {
+                "application/javascript, text/javascript, */*"
+            } else {
+                "application/json"
+            },
+        )
         .header("user-agent", "YYS-CBG-Inspector/1.0")
         .send()
         .await
@@ -1867,10 +2188,14 @@ async fn update_static_data(app: tauri::AppHandle, endpoint: String) -> Result<V
         return Err(message.unwrap_or_else(|| "远程数据暂时无法获取，请稍后重试".to_owned()));
     }
 
-    let data = serde_json::from_str::<Value>(&response_text).map_err(|_| {
-        log_api!("update_static_data 响应不是有效 JSON");
-        "远程数据格式异常，请稍后重试".to_owned()
-    })?;
+    let data = if is_server_list {
+        parse_server_list_script(&response_text)?
+    } else {
+        serde_json::from_str::<Value>(&response_text).map_err(|_| {
+            log_api!("update_static_data 响应不是有效 JSON");
+            "远程数据格式异常，请稍后重试".to_owned()
+        })?
+    };
     write_static_json(&app, &endpoint, &data)?;
     log_api!(&format!(
         "update_static_data 响应成功：HTTP {status}，{} 字节，已写入本地缓存",
@@ -1971,14 +2296,105 @@ fn open_downloads_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| format!("打开下载目录失败：{error}"))
 }
 
+#[cfg(windows)]
+fn is_browser_registered(executable: &str) -> bool {
+    // shortcut: 仅识别 Windows App Paths 注册项；需要支持便携版浏览器时再补路径发现。
+    let Some(registry_tool) = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .map(|root| root.join("System32").join("reg.exe"))
+    else {
+        return false;
+    };
+    let registry_keys = [
+        format!(r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{executable}"),
+        format!(r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{executable}"),
+        format!(
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\{executable}"
+        ),
+    ];
+
+    registry_keys.iter().any(|key| {
+        std::process::Command::new(&registry_tool)
+            .args(["query", key])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+#[tauri::command]
+fn get_installed_browsers() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        [
+            ("edge", "msedge.exe"),
+            ("chrome", "chrome.exe"),
+            ("firefox", "firefox.exe"),
+        ]
+        .into_iter()
+        .filter_map(|(browser, executable)| {
+            is_browser_registered(executable).then(|| browser.to_owned())
+        })
+        .collect()
+    }
+
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if BACKGROUND_SEARCH_RUNNING.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else {
+                    window.app_handle().exit(0);
+                }
+            }
+        })
         .register_uri_scheme_protocol("yys-cbg-assets", |context, request| {
             serve_asset(context.app_handle(), request)
         })
         .setup(|app| {
+            let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let icon = app.default_window_icon().cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "缺少默认窗口图标")
+            })?;
+            TrayIconBuilder::new()
+                .icon(icon)
+                .menu(&menu)
+                .tooltip("号来")
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+
             #[cfg(windows)]
             {
                 app.handle().plugin(tauri_plugin_process::init())?;
@@ -1991,27 +2407,31 @@ pub fn run() {
                 // 开发模式默认打开控制台，方便排查本地资源、接口和页面运行时问题；生产包不主动打开。
                 window.open_devtools();
             }
-            if let Err(error) = create_cbg_window(app.handle(), CbgChannel::Official) {
-                eprintln!("启动时无法打开独立藏宝阁窗口：{error}");
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             get_compute_capacity,
             toggle_cbg_window,
+            hide_main_window,
+            schedule_background_search,
+            set_background_search_running,
             set_cbg_webview,
             set_cbg_window_fullscreen,
             take_cbg_page_capture,
             get_cbg_login_status,
             apply_cbg_role_search,
+            read_cbg_role_results,
+            next_cbg_role_results_page,
             load_product,
+            load_product_raw,
             save_account_summary,
             read_static_data,
             update_static_data,
             save_static_data,
             update_static_assets,
             open_downloads_folder,
+            get_installed_browsers,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

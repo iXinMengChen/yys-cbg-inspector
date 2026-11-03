@@ -8,8 +8,8 @@ export type AppRoute =
   | "speed"
   | "pve"
   | "hero-skills"
-  | "maintenance"
-  | "about";
+  | "settings"
+  | "maintenance";
 
 export type AppNavigationItem = {
   route: AppRoute;

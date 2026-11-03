@@ -1,4 +1,5 @@
 import "./index.scss";
+import { useEffect, useState } from "react";
 import {
   AppstoreOutlined,
   ArrowRightOutlined,
@@ -11,13 +12,15 @@ import {
   StarOutlined,
   TrophyOutlined,
 } from "@ant-design/icons";
-import { Button, Card, Tooltip } from "antd";
-import { useMemo } from "react";
+import { Button, Card, Tooltip, message } from "antd";
 import { useNavigate } from "react-router-dom";
 import { assetUrl } from "@/lib/assetUrl";
-import { getFullSpeedRelics } from "@/lib/accountAnalysis";
+import { openExternalUrl } from "@/lib/externalBrowser";
+import {
+  getRelicAnalysis,
+  type RelicAnalysisStatistics,
+} from "@/lib/homeAnalysis";
 import { CBG_CHANNEL_LABELS, getCbgChannelFromUrl } from "@/lib/relics";
-import { getPveSuitScoreRanking } from "../Pve";
 import { useAppSelector } from "@/store";
 import { AccountDataItem } from "./AccountDataItem";
 import { PositionCountTable } from "./PositionCountTable";
@@ -75,54 +78,61 @@ const overviewShortcuts = [
   { path: "/calculator", label: "御魂计算器", icon: <CalculatorOutlined /> },
   { path: "/relics", label: "御魂库存", icon: <AppstoreOutlined /> },
 ] as const;
+
 export function HomePage({}: HomePageProps) {
   const dataset = useAppSelector((state) => state.app.dataset);
   const navigate = useNavigate();
+  const [messageApi, messageHolder] = message.useMessage();
   const account = dataset.account || {};
+  const [analysisState, setAnalysisState] = useState<{
+    dataset: typeof dataset;
+    statistics?: RelicAnalysisStatistics;
+    error?: boolean;
+  }>();
+  useEffect(() => {
+    let isCurrent = true;
+    void getRelicAnalysis(dataset).then(
+      (statistics) => {
+        if (isCurrent) setAnalysisState({ dataset, statistics });
+      },
+      () => {
+        if (isCurrent) setAnalysisState({ dataset, error: true });
+      },
+    );
+    return () => {
+      isCurrent = false;
+    };
+  }, [dataset]);
+  const analysis =
+    analysisState?.dataset === dataset ? analysisState.statistics : undefined;
+  const analysisFailed =
+    analysisState?.dataset === dataset && analysisState.error === true;
   const channel = account.channel ?? getCbgChannelFromUrl(account.sourceUrl);
   const channelLabel =
     channel && channel !== "official" ? CBG_CHANNEL_LABELS[channel] : undefined;
-  const relicCount = Object.values(dataset.relicsByPosition || {}).reduce(
-    (total, relics) => total + relics.length,
-    0,
-  );
-  const maxLevelRelicCount = Object.values(
-    dataset.relicsByPosition || {},
-  ).reduce(
-    (total, relics) =>
-      total +
-      relics.filter((relic) => relic.quality === 6 && relic.level === 15)
-        .length,
-    0,
-  );
-  const fullSpeedRelics = useMemo(() => getFullSpeedRelics(dataset), [dataset]);
-  const fullSpeedCountsByPosition = useMemo(
-    () =>
-      [1, 2, 3, 4, 5, 6].map((position) => ({
-        position,
-        count: fullSpeedRelics.filter((relic) => relic.position === position)
-          .length,
-      })),
-    [fullSpeedRelics],
-  );
-  const relicCountsByPosition = useMemo(
-    () =>
-      [1, 2, 3, 4, 5, 6].map((position) => ({
-        position,
-        count: (dataset.relicsByPosition[String(position)] || []).length,
-      })),
-    [dataset.relicsByPosition],
-  );
-  const pveSuitScoreRanking = useMemo(
-    () => getPveSuitScoreRanking(dataset),
-    [dataset],
-  );
-  const hasLoadedProduct = Boolean(account.sourceUrl) || relicCount > 0;
+  const hasLoadedProduct =
+    Boolean(account.sourceUrl) ||
+    Object.keys(dataset.relicsByPosition || {}).length > 0;
+  const displayAnalysisNumber = (value: number | undefined) =>
+    value === undefined
+      ? analysisFailed
+        ? "暂不可用"
+        : "统计中…"
+      : displayNumber(value);
+  const openAccountLink = () => {
+    if (!account.sourceUrl) return;
+    void openExternalUrl(account.sourceUrl).catch((error: unknown) => {
+      messageApi.error(
+        `账号链接打开失败：${error instanceof Error ? error.message : "请检查默认浏览器设置"}`,
+      );
+    });
+  };
 
   if (!hasLoadedProduct) return null;
 
   return (
     <div className="width overview-page">
+      {messageHolder}
       <section className="overview-title">
         <div>
           <div className="overview-title-main">
@@ -151,9 +161,7 @@ export function HomePage({}: HomePageProps) {
           <Button
             type="default"
             icon={<LinkOutlined />}
-            href={account.sourceUrl}
-            target="_blank"
-            rel="noreferrer"
+            onClick={openAccountLink}
             disabled={!account.sourceUrl}
           >
             账号链接
@@ -235,10 +243,18 @@ export function HomePage({}: HomePageProps) {
               </div>
               <div className="overview-speed-metric overview-speed-metric--count overview-speed-metric--full">
                 <span>满速御魂数量</span>
-                <strong>{fullSpeedRelics.length}</strong>
+                <strong>
+                  {displayAnalysisNumber(analysis?.fullSpeedRelicCount)}
+                </strong>
               </div>
             </div>
-            <PositionCountTable counts={fullSpeedCountsByPosition} />
+            {analysis ? (
+              <PositionCountTable counts={analysis.fullSpeedCountsByPosition} />
+            ) : (
+              <span role="status" aria-live="polite">
+                {analysisFailed ? "御魂统计暂不可用" : "正在统计御魂数据…"}
+              </span>
+            )}
           </div>
         </Card>
       </section>
@@ -299,14 +315,17 @@ export function HomePage({}: HomePageProps) {
                 <div>
                   <span>全部御魂数量</span>
                   <strong>
-                    {displayNumber(account.relicSummary ?? relicCount)}
+                    {displayAnalysisNumber(
+                      account.relicSummary ?? analysis?.relicCount,
+                    )}
                   </strong>
                 </div>
                 <div>
                   <span>6星满级御魂数量</span>
                   <strong>
-                    {displayNumber(
-                      account.maxLevelRelicCount ?? maxLevelRelicCount,
+                    {displayAnalysisNumber(
+                      account.maxLevelRelicCount ??
+                        analysis?.maxLevelRelicCount,
                     )}
                   </strong>
                 </div>
@@ -321,11 +340,17 @@ export function HomePage({}: HomePageProps) {
                 查看全部御魂
               </Button>
             </div>
-            <PositionCountTable
-              counts={relicCountsByPosition}
-              title="各号位御魂数量"
-              description="按号位统计全部御魂"
-            />
+            {analysis ? (
+              <PositionCountTable
+                counts={analysis.relicCountsByPosition}
+                title="各号位御魂数量"
+                description="按号位统计全部御魂"
+              />
+            ) : (
+              <span role="status" aria-live="polite">
+                {analysisFailed ? "御魂统计暂不可用" : "正在统计御魂数据…"}
+              </span>
+            )}
           </Card>
 
           <Card
@@ -346,8 +371,8 @@ export function HomePage({}: HomePageProps) {
             className="overview-pve-summary"
           >
             <div className="overview-pve-score-list">
-              {pveSuitScoreRanking.length ? (
-                pveSuitScoreRanking.map((item) => (
+              {analysis?.pveSuitScoreRanking.length ? (
+                analysis.pveSuitScoreRanking.map((item) => (
                   <div className="overview-pve-score-item" key={item.suitName}>
                     <div className="overview-pve-score-title">
                       <span>{item.suitName}</span>
@@ -356,9 +381,13 @@ export function HomePage({}: HomePageProps) {
                     <strong>{item.totalScore}</strong>
                   </div>
                 ))
-              ) : (
+              ) : analysis ? (
                 <span className="overview-pve-score-empty">
                   暂无符合条件的御魂
+                </span>
+              ) : (
+                <span role="status" aria-live="polite">
+                  {analysisFailed ? "评分统计暂不可用" : "正在统计…"}
                 </span>
               )}
             </div>

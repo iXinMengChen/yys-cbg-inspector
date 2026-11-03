@@ -319,6 +319,7 @@ export function extractCbgCollectionSkinCount(
 export function convertCbgPayloadToDataset(
   payload: unknown,
   gameConfig: GameConfig,
+  options?: { accountOnly?: boolean },
 ): RelicDataset {
   const equip = (payload as any)?.equip || (payload as any)?.equip_data;
   const equipDescription = equip?.equip_desc;
@@ -424,61 +425,61 @@ export function convertCbgPayloadToDataset(
         !spiritIds.has(hero.heroId) &&
         hero.skillLevels.length > 0,
     );
-  const relics: RelicView[] = Object.values(detail.inventory || {}).map(
-    (raw: any) => {
-      const groups = new Map<string, any>();
-      const growthRolls: GrowthRoll[] = [];
-      for (const [key, coefficient] of raw.rattr || []) {
-        const value = (growthMax[key] || 0) * Number(coefficient);
-        const group = groups.get(key) || {
-          key,
-          label: rollLabels[key] || key,
-          count: 0,
-          total: 0,
-          values: [],
-        };
-        group.count += 1;
-        group.total += value;
-        group.values.push(value);
-        groups.set(key, group);
-        growthRolls.push({
-          key,
-          label: rollLabels[key] || key,
-          maxGrowth: growthMax[key] || 0,
-          coefficient: Number(coefficient),
-          increase: value,
-        });
-      }
-      const attributes = (raw.attrs || []).map(normalizeAttribute);
-      return {
-        id: String(raw.uuid || ""),
-        level: Number(raw.level) || 0,
-        quality: Number(raw.qua) || 0,
-        position: Number(raw.pos) || 0,
-        suit: {
-          id: Number(raw.suitid) || 0,
-          name: String(raw.name || "未知御魂"),
-          isTwoPieceSet: Boolean(twoPieceSets[String(raw.suitid)]),
-          twoPieceConfig: twoPieceSets[String(raw.suitid)] || null,
-        },
-        mainAttribute: attributes[0] || null,
-        subAttributes: attributes.slice(1),
-        setBonusAttribute: raw.single_attr
-          ? normalizeAttribute(raw.single_attr)
-          : null,
-        enhancement: { totals: [...groups.values()] },
-        detail: {
-          growthRolls,
-          ...buildEnhancementStages(
-            growthRolls,
-            raw.level,
-            attributes[0] || null,
-            raw.qua,
-          ),
-        },
+  const relics: RelicView[] = Object.values(
+    options?.accountOnly ? {} : detail.inventory || {},
+  ).map((raw: any) => {
+    const groups = new Map<string, any>();
+    const growthRolls: GrowthRoll[] = [];
+    for (const [key, coefficient] of raw.rattr || []) {
+      const value = (growthMax[key] || 0) * Number(coefficient);
+      const group = groups.get(key) || {
+        key,
+        label: rollLabels[key] || key,
+        count: 0,
+        total: 0,
+        values: [],
       };
-    },
-  );
+      group.count += 1;
+      group.total += value;
+      group.values.push(value);
+      groups.set(key, group);
+      growthRolls.push({
+        key,
+        label: rollLabels[key] || key,
+        maxGrowth: growthMax[key] || 0,
+        coefficient: Number(coefficient),
+        increase: value,
+      });
+    }
+    const attributes = (raw.attrs || []).map(normalizeAttribute);
+    return {
+      id: String(raw.uuid || ""),
+      level: Number(raw.level) || 0,
+      quality: Number(raw.qua) || 0,
+      position: Number(raw.pos) || 0,
+      suit: {
+        id: Number(raw.suitid) || 0,
+        name: String(raw.name || "未知御魂"),
+        isTwoPieceSet: Boolean(twoPieceSets[String(raw.suitid)]),
+        twoPieceConfig: twoPieceSets[String(raw.suitid)] || null,
+      },
+      mainAttribute: attributes[0] || null,
+      subAttributes: attributes.slice(1),
+      setBonusAttribute: raw.single_attr
+        ? normalizeAttribute(raw.single_attr)
+        : null,
+      enhancement: { totals: [...groups.values()] },
+      detail: {
+        growthRolls,
+        ...buildEnhancementStages(
+          growthRolls,
+          raw.level,
+          attributes[0] || null,
+          raw.qua,
+        ),
+      },
+    };
+  });
   return {
     schemaVersion: 11,
     account: {
@@ -491,7 +492,11 @@ export function convertCbgPayloadToDataset(
       pvpScore: detail.pvp_score,
       pvpStage: detail.pvp_stage,
       ...speedHighlights,
-      relicSummary: detail.equips_summary,
+      relicSummary:
+        detail.equips_summary ??
+        (options?.accountOnly
+          ? Object.keys(detail.inventory || {}).length
+          : undefined),
       heroSummary: detail.hero_summary,
       collectionSkinCount: countCollectionSkins(detail, gameConfig),
       yuxingDama,
@@ -513,12 +518,14 @@ export function convertCbgPayloadToDataset(
       },
     },
     heroes,
-    relicsByPosition: Object.fromEntries(
-      [1, 2, 3, 4, 5, 6].map((position) => [
-        String(position),
-        relics.filter((relic) => relic.position === position),
-      ]),
-    ),
+    relicsByPosition: options?.accountOnly
+      ? {}
+      : Object.fromEntries(
+          [1, 2, 3, 4, 5, 6].map((position) => [
+            String(position),
+            relics.filter((relic) => relic.position === position),
+          ]),
+        ),
   };
 }
 

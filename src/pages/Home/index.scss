@@ -1448,13 +1448,18 @@
 }
 
 .shell.has-product .overview-loader-wrap {
-  margin-top: 6px;
+  margin-top: 24px;
+  margin-bottom: 12px;
+}
+
+.shell.is-mobile.has-product .overview-loader-wrap {
+  margin-top: 8px;
   margin-bottom: 4px;
 }
 
 .shell.has-product .overview-loader-wrap {
   box-sizing: border-box;
-  width: calc(100% - 40px);
+  width: 100%;
   max-width: 1360px;
   margin-right: auto;
   margin-left: auto;

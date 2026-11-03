@@ -1,4 +1,9 @@
-import { configureStore, createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import {
+  configureStore,
+  createSlice,
+  type PayloadAction,
+} from "@reduxjs/toolkit";
+import { setAutoFreeze } from "immer";
 import {
   useDispatch,
   useSelector,
@@ -24,6 +29,8 @@ export type AppState = {
   updating: boolean;
   history: DatasetHistoryRecord[];
   historyOpen: boolean;
+  /** 本机历史记录正在从 IndexedDB 读取，用于展示加载状态而不是让界面显得卡住。 */
+  historyLoading: boolean;
   mobileMenuOpen: boolean;
   staticDataLoading: boolean;
   calculatorStaticRefreshRequestId: number;
@@ -34,6 +41,9 @@ export type AppState = {
 
 export const emptyDataset: RelicDataset = { relicsByPosition: {} };
 
+// 藏宝阁御魂详情体积较大，递归冻结会在账号切页时同步阻塞主线程。
+setAutoFreeze(false);
+
 const initialState: AppState = {
   dataset: emptyDataset,
   productUrl: "",
@@ -41,6 +51,7 @@ const initialState: AppState = {
   updating: false,
   history: [],
   historyOpen: false,
+  historyLoading: false,
   mobileMenuOpen: false,
   staticDataLoading: false,
   calculatorStaticRefreshRequestId: 0,
@@ -68,8 +79,21 @@ const appSlice = createSlice({
     setHistory(state, action: PayloadAction<DatasetHistoryRecord[]>) {
       state.history = action.payload;
     },
+    /**
+     * 用一条记录更新历史列表：同主键替换并保持按保存时间倒序。
+     * 保存商品后走这里，避免为了刷新列表再整表读一次 IndexedDB（那要几秒）。
+     */
+    upsertHistoryRecord(state, action: PayloadAction<DatasetHistoryRecord>) {
+      state.history = [
+        action.payload,
+        ...state.history.filter((record) => record.id !== action.payload.id),
+      ].sort((left, right) => right.savedAt - left.savedAt);
+    },
     setHistoryOpen(state, action: PayloadAction<boolean>) {
       state.historyOpen = action.payload;
+    },
+    setHistoryLoading(state, action: PayloadAction<boolean>) {
+      state.historyLoading = action.payload;
     },
     setMobileMenuOpen(state, action: PayloadAction<boolean>) {
       state.mobileMenuOpen = action.payload;
@@ -106,6 +130,7 @@ export const {
   setDataset,
   setHistory,
   setHistoryOpen,
+  setHistoryLoading,
   setMaintenanceOpen,
   setMobileMenuOpen,
   setProductUrl,
@@ -113,12 +138,21 @@ export const {
   setStaticAssetPreview,
   setStaticDataLoading,
   setUpdating,
+  upsertHistoryRecord,
 } = appSlice.actions;
 
 export const store = configureStore({
   reducer: {
     app: appSlice.reducer,
   },
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware({
+      immutableCheck: { ignoredPaths: ["app.dataset"] },
+      serializableCheck: {
+        ignoredActions: [setDataset.type],
+        ignoredPaths: ["app.dataset"],
+      },
+    }),
 });
 
 export type RootState = ReturnType<typeof store.getState>;

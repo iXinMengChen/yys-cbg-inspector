@@ -26,7 +26,8 @@ export function PageNavigation({
 }: PageNavigationProps) {
   const dispatch = useAppDispatch();
   const isMobile = useMobileLayout();
-  const { updating, history } = useAppSelector((state) => state.app);
+  const updating = useAppSelector((state) => state.app.updating);
+  const historyCount = useAppSelector((state) => state.app.history.length);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isCbgLoggedIn, setIsCbgLoggedIn] = useState<boolean | null>(null);
@@ -34,10 +35,10 @@ export function PageNavigation({
     (item) => item.route === guardedPage,
   );
   const bottomNavigationItems = navigationItems.filter(
-    (item) => item.route === "maintenance" || item.route === "about",
+    (item) => item.route === "settings" || item.route === "maintenance",
   );
   const mainNavigationItems = navigationItems.filter(
-    (item) => item.route !== "maintenance" && item.route !== "about",
+    (item) => item.route !== "settings" && item.route !== "maintenance",
   );
 
   useEffect(() => {
@@ -91,7 +92,7 @@ export function PageNavigation({
         className="page-menu-action"
         type="button"
         aria-label="历史记录"
-        disabled={updating || history.length === 0}
+        disabled={updating || historyCount === 0}
         onClick={() => {
           setMobileMenuOpen(false);
           dispatch(setHistoryOpen(true));
@@ -161,7 +162,7 @@ export function PageNavigation({
           {renderLinks(mainNavigationItems)}
         </nav>
         <div className="page-sidebar-footer">
-          <nav className="page-sidebar-links" aria-label="维护与关于">
+          <nav className="page-sidebar-links" aria-label="设置与维护">
             {renderLinks(bottomNavigationItems)}
           </nav>
           <div className="page-sidebar-actions">{utilityActions}</div>

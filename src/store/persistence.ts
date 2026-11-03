@@ -11,7 +11,7 @@ const databaseVersion = 2;
 const snapshotStoreName = "snapshots";
 const historyStoreName = "history";
 const snapshotKey = "recent-dataset";
-const historyLimit = 10;
+export const ACCOUNT_DATA_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const legacyDatasetKey = "yys-cbg-inspector.recent-dataset.v1";
 const legacyProductUrlKey = "yys-cbg-inspector.recent-product-url.v1";
 
@@ -146,16 +146,21 @@ function normalizeHeroes(value: unknown): HeroView[] | undefined {
 }
 
 // 旧版本的本地数据可能不完整，恢复前先收敛为页面可安全使用的结构。
-function normalizeDataset(value: unknown): RelicDataset | null {
+function normalizeDataset(
+  value: unknown,
+  includeRelics = true,
+): RelicDataset | null {
   if (!isRecord(value) || !isRecord(value.relicsByPosition)) return null;
 
-  const relicsByPosition = Object.fromEntries(
-    Object.entries(value.relicsByPosition).flatMap(([position, relics]) =>
-      Array.isArray(relics)
-        ? [[position, relics.filter(isRecord) as RelicView[]]]
-        : [],
-    ),
-  );
+  const relicsByPosition = includeRelics
+    ? Object.fromEntries(
+        Object.entries(value.relicsByPosition).flatMap(([position, relics]) =>
+          Array.isArray(relics)
+            ? [[position, relics.filter(isRecord) as RelicView[]]]
+            : [],
+        ),
+      )
+    : {};
   const account = normalizeAccount(value.account);
   const heroes = normalizeHeroes(value.heroes);
   const {
@@ -204,6 +209,10 @@ function createHistoryRecord(
   };
 }
 
+function isPastAccountDataRetention(savedAt: number, now = Date.now()) {
+  return savedAt <= 0 || now - savedAt > ACCOUNT_DATA_RETENTION_MS;
+}
+
 function openCacheDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = window.indexedDB.open(databaseName, databaseVersion);
@@ -241,9 +250,12 @@ function readLegacySnapshot(): RecentDatasetSnapshot | null {
   }
 }
 
-function asSnapshot(value: unknown): RecentDatasetSnapshot | null {
+function asSnapshot(
+  value: unknown,
+  includeRelics = true,
+): RecentDatasetSnapshot | null {
   if (!isRecord(value)) return null;
-  const dataset = normalizeDataset(value.dataset);
+  const dataset = normalizeDataset(value.dataset, includeRelics);
   if (!dataset) return null;
   return {
     dataset,
@@ -252,9 +264,12 @@ function asSnapshot(value: unknown): RecentDatasetSnapshot | null {
   };
 }
 
-function asHistoryRecord(value: unknown): DatasetHistoryRecord | null {
+function asHistoryRecord(
+  value: unknown,
+  includeRelics = true,
+): DatasetHistoryRecord | null {
   if (!isRecord(value) || typeof value.id !== "string") return null;
-  const snapshot = asSnapshot(value);
+  const snapshot = asSnapshot(value, includeRelics);
   if (!snapshot) return null;
   return {
     ...snapshot,
@@ -289,7 +304,14 @@ async function readStoreValue(storeName: string, key: IDBValidKey) {
 
 export async function loadRecentDatasetSnapshot() {
   try {
-    return asSnapshot(await readStoreValue(snapshotStoreName, snapshotKey));
+    const snapshot = asSnapshot(
+      await readStoreValue(snapshotStoreName, snapshotKey),
+    );
+    if (snapshot && isPastAccountDataRetention(snapshot.savedAt)) {
+      await clearRecentDatasetSnapshot();
+      return null;
+    }
+    return snapshot;
   } catch {
     return readLegacySnapshot();
   }
@@ -299,13 +321,12 @@ export async function saveRecentDatasetSnapshotOnly(
   dataset: RelicDataset,
   productUrl: string,
 ) {
-  const normalizedDataset = normalizeDataset(dataset);
-  if (!normalizedDataset)
+  if (!isRecord(dataset) || !isRecord(dataset.relicsByPosition))
     throw new Error("账号数据格式不完整，无法保存本地快照");
 
   const snapshot: RecentDatasetSnapshot = {
-    dataset: normalizedDataset,
-    productUrl: productUrl.trim() || normalizedDataset.account?.sourceUrl || "",
+    dataset,
+    productUrl: productUrl.trim() || dataset.account?.sourceUrl || "",
     savedAt: Date.now(),
   };
   const database = await openCacheDatabase();
@@ -351,21 +372,74 @@ export async function clearRecentDatasetSnapshot() {
   }
 }
 
+/** 让出一次主线程，让加载状态和后续绘制有机会执行。 */
+function yieldToMainThread() {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+}
+
+/**
+ * 分批读取历史记录。
+ *
+ * 历史记录里每条都带着整份御魂数据，一次性 getAll 会在主线程上连续反序列化上 GB 的对象，
+ * 界面会僵住好几秒。这里先只取主键（几乎不耗时），再逐条 get，每条之间让出主线程：
+ * 单条仍需几十到两百毫秒，但不再是一次长冻结，加载状态可以正常转起来。
+ */
+async function readHistoryRecordsInBatches(
+  database: IDBDatabase,
+): Promise<unknown[]> {
+  const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+    const request = database
+      .transaction(historyStoreName, "readonly")
+      .objectStore(historyStoreName)
+      .getAllKeys();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+
+  const records: unknown[] = [];
+  for (const key of keys) {
+    const value = await new Promise<unknown>((resolve, reject) => {
+      const request = database
+        .transaction(historyStoreName, "readonly")
+        .objectStore(historyStoreName)
+        .get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    if (value !== undefined) records.push(value);
+    await yieldToMainThread();
+  }
+  return records;
+}
+
 export async function loadDatasetHistory(): Promise<DatasetHistoryRecord[]> {
   try {
     const database = await openCacheDatabase();
     try {
-      const records = await new Promise<unknown[]>((resolve, reject) => {
-        const request = database
-          .transaction(historyStoreName, "readonly")
-          .objectStore(historyStoreName)
-          .getAll();
-        request.onsuccess = () => resolve(request.result || []);
-        request.onerror = () => reject(request.error);
-      });
+      const records = await readHistoryRecordsInBatches(database);
+      // 过期记录复用本次扫描结果清理：整表读取一次就要几秒，不能再为清理多读一遍。
+      const expiredIds = records
+        .filter(
+          (record): record is Record<string, unknown> =>
+            isRecord(record) &&
+            typeof record.id === "string" &&
+            isPastAccountDataRetention(numberValue(record.savedAt) ?? 0),
+        )
+        .map((record) => record.id as string);
+      await deleteHistoryRecords(database, expiredIds);
+      const expiredIdSet = new Set(expiredIds);
       const validRecords = records
-        .map(asHistoryRecord)
-        .filter((record): record is DatasetHistoryRecord => Boolean(record))
+        .filter(
+          (record) =>
+            !isRecord(record) ||
+            typeof record.id !== "string" ||
+            !expiredIdSet.has(record.id),
+        )
+        .map((record) => asHistoryRecord(record, false))
+        .filter(
+          (record): record is DatasetHistoryRecord =>
+            Boolean(record) && !isPastAccountDataRetention(record.savedAt),
+        )
         .sort((left, right) => right.savedAt - left.savedAt);
       const uniqueRecords = new Map<string, DatasetHistoryRecord>();
       validRecords.forEach((record) => {
@@ -378,12 +452,18 @@ export async function loadDatasetHistory(): Promise<DatasetHistoryRecord[]> {
     }
   } catch {
     return [];
+  } finally {
   }
 }
 
 export async function loadDatasetHistoryRecord(id: string) {
   try {
-    return asHistoryRecord(await readStoreValue(historyStoreName, id));
+    const record = asHistoryRecord(await readStoreValue(historyStoreName, id));
+    if (record && isPastAccountDataRetention(record.savedAt)) {
+      await deleteDatasetHistoryRecord(id);
+      return null;
+    }
+    return record;
   } catch {
     return null;
   }
@@ -409,63 +489,21 @@ export async function deleteDatasetHistoryRecord(id: string) {
   }
 }
 
-async function removeDuplicateHistoryRecords(
+/**
+ * 按主键批量删除历史记录。
+ *
+ * 历史库里每条记录都带整份御魂数据，整表扫描（getAll）要 2.7～5.5 秒并阻塞主线程，
+ * 所以清理过期记录必须复用调用方已经读到的那一份数据，不能为了清理再扫一遍。
+ */
+async function deleteHistoryRecords(
   database: IDBDatabase,
-  productUrl: string,
+  ids: readonly string[],
 ) {
-  const identity = historyId(productUrl);
-  const records = await new Promise<unknown[]>((resolve, reject) => {
-    const request = database
-      .transaction(historyStoreName, "readonly")
-      .objectStore(historyStoreName)
-      .getAll();
-    request.onsuccess = () => resolve(request.result || []);
-    request.onerror = () => reject(request.error);
-  });
-  const duplicateIds = records
-    .map(asHistoryRecord)
-    .filter((record): record is DatasetHistoryRecord => Boolean(record))
-    .filter((record) => historyId(record.productUrl) === identity)
-    .map((record) => record.id);
-  if (!duplicateIds.length) return;
-
+  if (!ids.length) return;
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(historyStoreName, "readwrite");
     const store = transaction.objectStore(historyStoreName);
-    duplicateIds.forEach((id) => store.delete(id));
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
-}
-
-async function trimDatasetHistory(database: IDBDatabase) {
-  const records = await new Promise<DatasetHistoryRecord[]>(
-    (resolve, reject) => {
-      const request = database
-        .transaction(historyStoreName, "readonly")
-        .objectStore(historyStoreName)
-        .getAll();
-      request.onsuccess = () =>
-        resolve(
-          (request.result || [])
-            .map(asHistoryRecord)
-            .filter((record): record is DatasetHistoryRecord =>
-              Boolean(record),
-            ),
-        );
-      request.onerror = () => reject(request.error);
-    },
-  );
-  const expired = records
-    .sort((left, right) => right.savedAt - left.savedAt)
-    .slice(historyLimit);
-  if (!expired.length) return;
-
-  await new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(historyStoreName, "readwrite");
-    const store = transaction.objectStore(historyStoreName);
-    expired.forEach((record) => store.delete(record.id));
+    ids.forEach((id) => store.delete(id));
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error);
@@ -476,24 +514,25 @@ export async function saveRecentDatasetSnapshot(
   dataset: RelicDataset,
   productUrl: string,
 ) {
-  const normalizedDataset = normalizeDataset(dataset);
-  if (!normalizedDataset)
+  if (!isRecord(dataset) || !isRecord(dataset.relicsByPosition))
     throw new Error("账号数据格式不完整，无法保存本地记录");
 
   const savedAt = Date.now();
   const snapshot: RecentDatasetSnapshot = {
-    dataset: normalizedDataset,
+    dataset,
     productUrl: productUrl.trim(),
     savedAt,
   };
   const historyRecord = createHistoryRecord(
-    normalizedDataset,
+    dataset,
     snapshot.productUrl,
     savedAt,
   );
   const database = await openCacheDatabase();
   try {
-    await removeDuplicateHistoryRecords(database, snapshot.productUrl);
+    // 只写这两条记录，不做任何整表扫描：
+    // 历史主键由商品链接推导（createHistoryRecord 里的 historyId），重复保存会覆盖同一条；
+    // 过期记录在读取历史列表时顺带清理，避免每次保存都扫一遍上 GB 的历史库。
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(
         [snapshotStoreName, historyStoreName],
@@ -505,8 +544,11 @@ export async function saveRecentDatasetSnapshot(
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);
     });
-    await trimDatasetHistory(database);
-    return historyRecord;
+    // 列表用的记录不能带整份御魂数据，否则每条 Redux 历史都会长期占几十到上百 MB。
+    return {
+      ...historyRecord,
+      dataset: { ...historyRecord.dataset, relicsByPosition: {} },
+    } satisfies DatasetHistoryRecord;
   } finally {
     database.close();
   }

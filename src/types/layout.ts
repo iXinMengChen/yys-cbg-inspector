@@ -23,6 +23,13 @@ export type PageNavigationProps = {
   loginChannel: CbgChannel;
 };
 
+export type SettingsPageOutletContext = {
+  themeMode: ThemeMode;
+  onToggleTheme: () => void;
+  cbgSyncEnabled: boolean;
+  setCbgSyncEnabled: (enabled: boolean) => void;
+};
+
 export type DatasetHistoryModalProps = {
   open: boolean;
   history: DatasetHistoryRecord[];
@@ -41,8 +48,6 @@ export type ProductLoaderProps = {
   onLoad: () => void;
   onOpenHistory: () => void;
   onOpenCbgWindow?: () => void;
-  onToggleCbgFullscreen?: () => void;
-  cbgWindowFullscreen?: boolean;
   cbgSyncEnabled?: boolean;
   onToggleCbgSync?: (enabled: boolean) => void;
 };

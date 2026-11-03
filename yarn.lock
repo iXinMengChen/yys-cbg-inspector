@@ -834,6 +834,13 @@
     "@tauri-apps/cli-win32-ia32-msvc" "2.11.4"
     "@tauri-apps/cli-win32-x64-msvc" "2.11.4"
 
+"@tauri-apps/plugin-notification@^2":
+  version "2.8.0"
+  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-notification/-/plugin-notification-2.8.0.tgz#b37835641011d62d25bd923310d9e6217a1e5685"
+  integrity sha512-BB9Kk2emiNHyMjIQr3k/ye8RKD2RJeOPCjM5OZLF+4/pO6Kfjl9RtkX4hVCe1vqgbAx5HjHXjf0O8rtdW2F2dw==
+  dependencies:
+    "@tauri-apps/api" "^2.12.0"
+
 "@tauri-apps/plugin-opener@^2":
   version "2.5.5"
   resolved "https://mirrors.cloud.tencent.com/npm/@tauri-apps/plugin-opener/-/plugin-opener-2.5.5.tgz#ef7b9aca07cb3416575e5024b996926c43276b69"

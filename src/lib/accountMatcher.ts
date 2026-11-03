@@ -1,5 +1,4 @@
 import type { DatasetHistoryRecord } from "@/store";
-import { getFullSpeedRelics } from "./accountAnalysis";
 
 export type AccountMatcherCriteria = {
   minimumPrice: number | null;
@@ -7,13 +6,9 @@ export type AccountMatcherCriteria = {
   selectedServers: string[];
   publication: "any" | "only" | "exclude";
   platforms: string[];
-  priority: "balanced" | "price" | "speed";
   dexRequirements: string[];
   numberFilters: Record<string, number | null>;
   assetFlags: string[];
-  skinNames: string[];
-  avatarFrames: string[];
-  goldenAvatarFrame: boolean;
   badges: string[];
   achievements: string[];
 };
@@ -27,6 +22,7 @@ export type AccountMatchEvidence = {
 
 export type AccountMatchResult = {
   record: DatasetHistoryRecord;
+  matchTier: "strict" | "expanded" | "outside";
   score: number | null;
   matchedCount: number;
   evaluatedCount: number;
@@ -35,10 +31,20 @@ export type AccountMatchResult = {
   unavailable: AccountMatchEvidence[];
 };
 
+export type AccountMatcherWorkerRequest = {
+  history: DatasetHistoryRecord[];
+  criteria: AccountMatcherCriteria;
+};
+
+export type AccountMatcherWorkerResponse =
+  | { type: "result"; results: AccountMatchResult[] }
+  | { type: "error"; message: string };
+
 type MatchDimension = "price" | "speed" | "other";
 type ScoredEvidence = AccountMatchEvidence & {
   value: number;
   dimension: MatchDimension;
+  withinExpandedRange?: boolean;
 };
 
 function finiteNumber(value: unknown): number | undefined {
@@ -77,6 +83,7 @@ function addKnown(
   actual: string,
   value: number,
   dimension: MatchDimension,
+  withinExpandedRange = value >= 1,
 ) {
   evidence.push({
     label,
@@ -85,6 +92,7 @@ function addKnown(
     status: value >= 1 ? "match" : "near",
     value: clamp(value),
     dimension,
+    withinExpandedRange,
   });
 }
 
@@ -109,6 +117,11 @@ function addMinimum(
     displayNumber(actual),
     actual >= required ? 1 : actual / required,
     dimension,
+    dimension === "speed"
+      ? /数量|个数|御魂数/.test(label)
+        ? actual >= required - 1
+        : actual >= required - 0.5
+      : actual >= required * 0.9,
   );
 }
 
@@ -132,6 +145,7 @@ function addMaximum(
     displayNumber(actual),
     actual <= maximum ? 1 : actual === 0 ? 0 : maximum / actual,
     "other",
+    actual <= maximum,
   );
 }
 
@@ -171,6 +185,7 @@ function addRange(
     `¥${displayNumber(actual)}`,
     closeness,
     "price",
+    !aboveMaximum && (minimum === null || actual >= minimum * 0.9),
   );
 }
 
@@ -186,13 +201,15 @@ function addChoice(
     addUnknown(evidence, label, expected);
     return;
   }
+  const isMatch = matches(actual);
   addKnown(
     evidence,
     label,
     expected,
     actual,
-    matches(actual) ? 1 : 0,
+    isMatch ? 1 : 0,
     dimension,
+    isMatch,
   );
 }
 
@@ -227,12 +244,7 @@ function assessRecord(
   criteria: AccountMatcherCriteria,
 ): AccountMatchResult {
   const evidence: ScoredEvidence[] = [];
-  const { account, heroes, relicsByPosition } = record.dataset;
-  const relicInventoryAvailable =
-    relicsByPosition && Object.keys(relicsByPosition).length > 0;
-  const fullSpeedRelics = relicInventoryAvailable
-    ? getFullSpeedRelics(record.dataset)
-    : undefined;
+  const { account, heroes } = record.dataset;
 
   if (criteria.selectedServers.length) {
     addChoice(
@@ -294,6 +306,7 @@ function assessRecord(
       `${dex.owned}/${dex.total}`,
       dex.owned / dex.total,
       "other",
+      dex.owned / dex.total >= 0.9,
     );
   });
 
@@ -340,7 +353,7 @@ function assessRecord(
     criteria,
     "minimumMaxSpeedCount",
     "满速御魂数",
-    fullSpeedRelics?.length,
+    undefined,
     "speed",
   );
   addMinimumFromFilter(
@@ -468,13 +481,6 @@ function assessRecord(
   );
 
   criteria.assetFlags.forEach((flag) => addUnknown(evidence, flag, "已开启"));
-  criteria.skinNames.forEach((skin) => addUnknown(evidence, "指定皮肤", skin));
-  criteria.avatarFrames.forEach((frame) =>
-    addUnknown(evidence, "头像框", frame),
-  );
-  if (criteria.goldenAvatarFrame) {
-    addUnknown(evidence, "京都之主（金达摩）", "拥有");
-  }
   criteria.badges.forEach((badge) => addUnknown(evidence, "徽章", badge));
   criteria.achievements.forEach((achievement) =>
     addUnknown(evidence, "成就", achievement),
@@ -482,22 +488,27 @@ function assessRecord(
 
   const scoredEvidence = evidence.filter((item) => item.status !== "unknown");
   const weightedTotal = scoredEvidence.reduce((total, item) => {
-    const weight = criteria.priority === item.dimension ? 3 : 1;
-    return total + item.value * weight;
+    return total + item.value;
   }, 0);
-  const totalWeight = scoredEvidence.reduce(
-    (total, item) => total + (criteria.priority === item.dimension ? 3 : 1),
-    0,
-  );
+  const totalWeight = scoredEvidence.length;
+
+  const differences = evidence.filter((item) => item.status === "near");
+  const matchTier =
+    differences.length === 0
+      ? "strict"
+      : differences.every((item) => item.withinExpandedRange)
+        ? "expanded"
+        : "outside";
 
   return {
     record,
+    matchTier,
     score: totalWeight ? Math.round((weightedTotal / totalWeight) * 100) : null,
     matchedCount: scoredEvidence.filter((item) => item.status === "match")
       .length,
     evaluatedCount: scoredEvidence.length,
     unknownCount: evidence.length - scoredEvidence.length,
-    differences: evidence.filter((item) => item.status === "near"),
+    differences,
     unavailable: evidence.filter((item) => item.status === "unknown"),
   };
 }
@@ -506,9 +517,28 @@ export function matchAccountHistory(
   history: DatasetHistoryRecord[],
   criteria: AccountMatcherCriteria,
 ) {
-  return history
-    .map((record) => assessRecord(record, criteria))
+  return rankAccountMatches(
+    [...new Map(history.map((record) => [record.id, record])).values()].map(
+      (record) => assessRecord(record, criteria),
+    ),
+  );
+}
+
+function rankAccountMatches(assessed: AccountMatchResult[]) {
+  const strictCount = assessed.filter(
+    (result) => result.matchTier === "strict",
+  ).length;
+
+  return assessed
+    .filter(
+      (result) =>
+        result.matchTier === "strict" ||
+        (strictCount < 10 && result.matchTier === "expanded"),
+    )
     .sort((left, right) => {
+      if (left.matchTier !== right.matchTier) {
+        return left.matchTier === "strict" ? -1 : 1;
+      }
       if (left.score !== right.score) {
         return (right.score ?? -1) - (left.score ?? -1);
       }
@@ -518,20 +548,13 @@ export function matchAccountHistory(
 
       const leftAccount = left.record.dataset.account;
       const rightAccount = right.record.dataset.account;
-      if (criteria.priority === "speed") {
-        const leftSpeed =
-          (finiteNumber(leftAccount?.scatteredFirstSpeed) ?? 0) +
-          (finiteNumber(leftAccount?.luckyFirstSpeed) ?? 0);
-        const rightSpeed =
-          (finiteNumber(rightAccount?.scatteredFirstSpeed) ?? 0) +
-          (finiteNumber(rightAccount?.luckyFirstSpeed) ?? 0);
-        if (leftSpeed !== rightSpeed) return rightSpeed - leftSpeed;
-      }
-      if (criteria.priority === "price") {
-        const leftPrice = finiteNumber(leftAccount?.price) ?? Infinity;
-        const rightPrice = finiteNumber(rightAccount?.price) ?? Infinity;
-        if (leftPrice !== rightPrice) return leftPrice - rightPrice;
-      }
+      const leftSpeed =
+        (finiteNumber(leftAccount?.scatteredFirstSpeed) ?? 0) +
+        (finiteNumber(leftAccount?.luckyFirstSpeed) ?? 0);
+      const rightSpeed =
+        (finiteNumber(rightAccount?.scatteredFirstSpeed) ?? 0) +
+        (finiteNumber(rightAccount?.luckyFirstSpeed) ?? 0);
+      if (leftSpeed !== rightSpeed) return leftSpeed - rightSpeed;
       return right.record.savedAt - left.record.savedAt;
     });
 }

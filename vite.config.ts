@@ -27,5 +27,8 @@ export default defineConfig({
     // 桌面端独占开发端口，避免与浏览器端 main 工作目录互相加载错误代码。
     port: 12832,
     strictPort: true,
+    watch: {
+      ignored: ["**/src-tauri/target/**"],
+    },
   },
 });
