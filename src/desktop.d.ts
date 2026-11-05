@@ -43,7 +43,7 @@ declare global {
         channel: CbgChannel,
         fullscreen: boolean,
       ): Promise<void>;
-      getCbgLoginStatus(channel: CbgChannel): Promise<boolean>;
+      getCbgLoginStatus(channel: CbgChannel): Promise<boolean | null>;
       applyCbgRoleSearch(
         criteria: AccountMatcherCriteria,
         options?: { background?: boolean },

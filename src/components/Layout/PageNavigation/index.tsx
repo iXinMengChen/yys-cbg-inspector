@@ -50,7 +50,7 @@ export function PageNavigation({
       checking = true;
       try {
         const loggedIn = await window.desktop?.getCbgLoginStatus(loginChannel);
-        if (!disposed) setIsCbgLoggedIn(loggedIn ?? false);
+        if (!disposed) setIsCbgLoggedIn(loggedIn ?? null);
       } catch {
         if (!disposed) setIsCbgLoggedIn(null);
       } finally {
@@ -108,14 +108,14 @@ export function PageNavigation({
           isCbgLoggedIn === null
             ? "藏宝阁登录状态未知"
             : isCbgLoggedIn
-              ? "藏宝阁已登录"
-              : "藏宝阁未登录"
+              ? "检测到藏宝阁登录凭据"
+              : "未检测到藏宝阁登录凭据"
         }
         title={
           isCbgLoggedIn === null
-            ? "暂时无法确认藏宝阁登录状态，正在重试"
+            ? "尚未打开可核验的藏宝阁页面，无法确认登录状态"
             : isCbgLoggedIn
-              ? "检测到藏宝阁登录凭据"
+              ? "检测到藏宝阁登录凭据；凭据本身不代表当前会话仍有效"
               : "尚未检测到藏宝阁登录凭据"
         }
       >
@@ -124,8 +124,8 @@ export function PageNavigation({
           {isCbgLoggedIn === null
             ? "登录状态未知"
             : isCbgLoggedIn
-              ? "藏宝阁已登录"
-              : "藏宝阁未登录"}
+              ? "检测到登录凭据"
+              : "未检测到登录凭据"}
         </span>
       </div>
       <ThemeToggle themeMode={themeMode} onToggle={onToggleTheme} />

@@ -75,7 +75,7 @@ export function installTauriDesktopBridge(): void {
       toggleCbgWindow: () => unsupportedInBrowser("打开藏宝阁窗口"),
       setCbgWebview: () => unsupportedInBrowser("显示藏宝阁页面"),
       setCbgWindowFullscreen: () => unsupportedInBrowser("切换藏宝阁全屏"),
-      getCbgLoginStatus: async () => false,
+      getCbgLoginStatus: async () => null,
       applyCbgRoleSearch: () => unsupportedInBrowser("自动填写藏宝阁筛选条件"),
       readCbgRoleResults: () => unsupportedInBrowser("读取藏宝阁筛选结果"),
       nextCbgRoleResultsPage: () =>
@@ -134,7 +134,7 @@ export function installTauriDesktopBridge(): void {
     setCbgWindowFullscreen: (channel, fullscreen) =>
       invoke<void>("set_cbg_window_fullscreen", { channel, fullscreen }),
     getCbgLoginStatus: (channel) =>
-      invoke<boolean>("get_cbg_login_status", { channel }),
+      invoke<boolean | null>("get_cbg_login_status", { channel }),
     applyCbgRoleSearch: (
       criteria: AccountMatcherCriteria,
       options?: { background?: boolean },

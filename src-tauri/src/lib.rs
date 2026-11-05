@@ -362,9 +362,17 @@ fn has_saved_cbg_login_cookie(cookies: &[String]) -> bool {
     })
 }
 
+fn saved_cbg_login_status(cookies: Option<&[String]>) -> Option<bool> {
+    if cookies.is_some_and(has_saved_cbg_login_cookie) {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 #[cfg(test)]
 mod cbg_login_tests {
-    use super::is_cbg_auth_cookie;
+    use super::{is_cbg_auth_cookie, saved_cbg_login_status};
 
     #[test]
     fn recognizes_cbg_login_session_cookies_only_when_nonempty() {
@@ -372,6 +380,13 @@ mod cbg_login_tests {
         assert!(is_cbg_auth_cookie("urs_share_login_token_h5", "token"));
         assert!(!is_cbg_auth_cookie("NTES_SESS", ""));
         assert!(!is_cbg_auth_cookie("NTES_P_UTID", "visitor"));
+    }
+
+    #[test]
+    fn saved_login_cookie_is_unverified_without_a_live_cbg_page() {
+        let cookies = vec!["NTES_SESS=session; Domain=yys.cbg.163.com; Path=/".to_owned()];
+        assert_eq!(saved_cbg_login_status(Some(&cookies)), None);
+        assert_eq!(saved_cbg_login_status(None), Some(false));
     }
 }
 
@@ -1315,7 +1330,10 @@ async fn take_cbg_page_capture(app: tauri::AppHandle) -> Result<Option<Value>, S
 }
 
 #[tauri::command]
-async fn get_cbg_login_status(app: tauri::AppHandle, channel: CbgChannel) -> Result<bool, String> {
+async fn get_cbg_login_status(
+    app: tauri::AppHandle,
+    channel: CbgChannel,
+) -> Result<Option<bool>, String> {
     let mut checked_live_view = false;
     if let Some(webview) = app.get_webview(CBG_BROWSER_LABEL) {
         let is_channel_page = webview
@@ -1328,7 +1346,7 @@ async fn get_cbg_login_status(app: tauri::AppHandle, channel: CbgChannel) -> Res
             let cookies = cbg_cookies_for_webview(&webview, channel).await?;
             if has_cbg_login_cookie(&cookies) {
                 save_cbg_cookies(&app, channel, &cookies)?;
-                return Ok(true);
+                return Ok(Some(true));
             }
         }
     }
@@ -1338,19 +1356,17 @@ async fn get_cbg_login_status(app: tauri::AppHandle, channel: CbgChannel) -> Res
         let cookies = cbg_cookies_for_window(&window, channel).await?;
         if has_cbg_login_cookie(&cookies) {
             save_cbg_cookies(&app, channel, &cookies)?;
-            return Ok(true);
+            return Ok(Some(true));
         }
     }
 
     if checked_live_view {
         clear_cbg_cookies(&app, channel)?;
-        return Ok(false);
+        return Ok(Some(false));
     }
 
-    Ok(
-        load_cbg_cookies(&app, channel)?
-            .is_some_and(|cookies| has_saved_cbg_login_cookie(&cookies)),
-    )
+    let saved_cookies = load_cbg_cookies(&app, channel)?;
+    Ok(saved_cbg_login_status(saved_cookies.as_deref()))
 }
 
 fn is_supported_cbg_source_host(host: &str) -> bool {
