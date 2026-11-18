@@ -1,8 +1,5 @@
 # 号来 · Tauri 桌面版
-
-> 本仓库还包含 Web 版（`nextjs-refactor`，GitHub 默认分支）与旧 Electron 版（`electron`）两条独立分支，历史互不相通。分支分工、历史关系和版本标签见 [BRANCHES.md](./BRANCHES.md)。
-
-这是阴阳师藏宝阁数据分析工具的 Tauri 2 + React + TypeScript 桌面版。页面和计算器逻辑沿用 Electron 版，桌面能力集中在 `src-tauri/src/lib.rs`，方便后续继续替换和维护。
+已迁移至`https://github.com/iXinMengChen/yys_tool_phoenix`
 
 ## 开发环境
 
