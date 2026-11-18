@@ -1,5 +1,5 @@
 # 号来 · Tauri 桌面版
-已迁移至`https://github.com/iXinMengChen/yys_tool_phoenix`
+已迁移至[yys_tool_phoenix](https://github.com/iXinMengChen/yys_tool_phoenix)
 
 ## 开发环境
 
