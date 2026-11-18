@@ -1,6 +1,5 @@
+# 已迁移至[yys_tool_phoenix](https://github.com/iXinMengChen/yys_tool_phoenix),该仓库已废弃
 
-# 由于官方修改了风控策略，我也不想摊上点什么，该项目暂不可用，大概率不会在启动了，请使用桌面版。
-#
 #
 # 阴阳师藏宝阁看号工具
 
