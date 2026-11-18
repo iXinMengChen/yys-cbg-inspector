@@ -1,7 +1,7 @@
+
+# 已迁移至[yys_tool_phoenix](https://github.com/iXinMengChen/yys_tool_phoenix),该仓库已废弃
+
 # 号来 · Tauri 桌面版
-已迁移至[yys_tool_phoenix](https://github.com/iXinMengChen/yys_tool_phoenix),该仓库已废弃
-
-
 ## 开发环境
 
 - Node.js 与 Yarn
